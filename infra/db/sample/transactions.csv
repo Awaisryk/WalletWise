@@ -1,0 +1,41 @@
+date,amount,merchant,category,account
+2026-01-05,-85.20,TESCO EXTRA,groceries,checking
+2026-01-08,-42.50,COSTA COFFEE,dining,checking
+2026-01-10,-1200.00,LANDLORD RENT,rent,checking
+2026-01-12,-18.99,NETFLIX,subscriptions,checking
+2026-01-15,-32.10,SAINSBURYS,groceries,checking
+2026-01-18,-15.75,MCDONALDS,dining,checking
+2026-01-20,-28.40,SHELL PETROL,transport,checking
+2026-01-25,2850.00,EMPLOYER SALARY,income,checking
+2026-02-03,-91.60,WAITROSE,groceries,checking
+2026-02-05,-22.30,STARBUCKS,dining,checking
+2026-02-07,-1200.00,LANDLORD RENT,rent,checking
+2026-02-10,-14.99,SPOTIFY,subscriptions,checking
+2026-02-12,-45.80,UBER,transport,checking
+2026-02-14,-38.20,PIZZA EXPRESS,dining,checking
+2026-02-18,-67.40,MARKS SPENCER FOOD,groceries,checking
+2026-02-20,-12.50,TESCO METRO,groceries,checking
+2026-02-25,2850.00,EMPLOYER SALARY,income,checking
+2026-03-01,-55.60,LIDL,groceries,checking
+2026-03-06,-1200.00,LANDLORD RENT,rent,checking
+2026-03-09,-13.99,AMAZON PRIME,subscriptions,checking
+2026-03-11,-18.99,NETFLIX,subscriptions,checking
+2026-03-13,-35.00,TRAINLINE,transport,checking
+2026-03-15,-29.80,WAGAMAMA,dining,checking
+2026-03-18,-48.20,ALDI,groceries,checking
+2026-03-22,-22.10,DELIVEROO,dining,checking
+2026-03-25,2850.00,EMPLOYER SALARY,income,checking
+2026-03-28,-19.40,BP FUEL,transport,checking
+2026-04-02,-75.30,TESCO EXTRA,groceries,checking
+2026-04-04,-23.80,COSTA COFFEE,dining,checking
+2026-04-06,-1200.00,LANDLORD RENT,rent,checking
+2026-04-09,-14.99,SPOTIFY,subscriptions,checking
+2026-04-12,-39.50,UBER,transport,checking
+2026-04-14,-42.10,HONEST BURGER,dining,checking
+2026-04-17,-62.40,SAINSBURYS,groceries,checking
+2026-04-22,-11.80,GREGGS,dining,checking
+2026-04-25,2850.00,EMPLOYER SALARY,income,checking
+2026-04-02,-75.30,TESCO EXTRA,groceries,checking
+2026-04-14,-42.10,HONEST BURGER,dining,checking
+2026-04-27,,MYSTERY STORE,,checking
+NOT_A_DATE,JUNK_ROW,TOTALLY INVALID,invalid,invalid
