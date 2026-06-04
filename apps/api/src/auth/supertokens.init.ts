@@ -12,8 +12,7 @@ let initialized = false;
  * On a successful sign-up we upsert a `User` row keyed by `authId` (the
  * SuperTokens user id) so our app has an internal `User.id` to hang owned
  * rows off. The override accepts a `PrismaClient` so it can write to our
- * schema; this is a separate, transient client from the long-lived
- * `PrismaService` inside Nest (see `main.ts`).
+ * schema before protected API routes later resolve `User.id` from the session.
  *
  * Idempotent: a no-op after the first call (SuperTokens itself throws on a
  * double init).
@@ -51,18 +50,14 @@ export function initSuperTokens(env: ApiEnv, prisma: PrismaClient): void {
               const emailField = input.formFields.find((f) => f.id === 'email');
               const email = emailField?.value ?? '';
 
-              try {
-                await prisma.user.upsert({
-                  where: { authId: response.user.id },
-                  update: {},
-                  create: {
-                    authId: response.user.id,
-                    email,
-                  },
-                });
-              } catch (e) {
-                console.error('Failed to persist user post-signUp:', e);
-              }
+              await prisma.user.upsert({
+                where: { authId: response.user.id },
+                update: {},
+                create: {
+                  authId: response.user.id,
+                  email,
+                },
+              });
 
               return response;
             },

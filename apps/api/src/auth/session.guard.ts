@@ -20,15 +20,12 @@ interface SessionRequest {
 }
 
 /**
- * Authenticates a request via the SuperTokens EmailPassword session.
+ * Authenticates a request via the SuperTokens session, resolves our app user,
+ * and attaches `{ id, authId }` to the request.
  *
- * Runs `verifySession` (via `Session.getSession`) against the Fastify
- * req/res, resolves our internal `User` by `authId`, and attaches
- * `{ id, authId }` to `request.walletwiseUser`. If the SuperTokens session is
- * valid but our row is missing (e.g. the sign-up upsert never ran), we create
- * it here as a safety net so a logged-in user always has an app identity.
- *
- * Throws `UnauthorizedException` when there is no valid session.
+ * TODO: Replace this custom guard/session plumbing with the official
+ * SuperTokens NestJS integration/module if we keep this stack beyond the
+ * assessment.
  */
 @Injectable()
 export class SessionGuard implements CanActivate {
@@ -51,20 +48,14 @@ export class SessionGuard implements CanActivate {
     if (!session) throw new UnauthorizedException('Authentication required');
 
     const authId = session.getUserId();
-    const user = await this.prisma.user.upsert({
+    const user = await this.prisma.user.findUnique({
       where: { authId },
-      update: {},
-      create: {
-        authId,
-        // SuperTokens owns the email; if our row is missing we backfill a
-        // placeholder keyed off authId to satisfy the unique constraint.
-        email: `${authId}@users.noreply.walletwise`,
-      },
-      select: { id: true },
+      select: { id: true, authId: true },
     });
+    if (!user) throw new UnauthorizedException('User profile not found');
 
     req.session = session;
-    req.walletwiseUser = { id: user.id, authId };
+    req.walletwiseUser = { id: user.id, authId: user.authId };
     return true;
   }
 }
