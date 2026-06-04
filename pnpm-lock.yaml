@@ -20,6 +20,12 @@ importers:
 
   apps/api:
     dependencies:
+      '@ai-sdk/groq':
+        specifier: ^3.0.15
+        version: 3.0.39(zod@3.25.76)
+      '@ai-sdk/openai-compatible':
+        specifier: ^2.0.13
+        version: 2.0.48(zod@3.25.76)
       '@fastify/cookie':
         specifier: ^9.3.1
         version: 9.4.0
@@ -38,6 +44,9 @@ importers:
       '@prisma/client':
         specifier: ^5.20.0
         version: 5.22.0(prisma@5.22.0)
+      '@walletwise/ai':
+        specifier: workspace:*
+        version: link:../../packages/ai
       '@walletwise/config':
         specifier: workspace:*
         version: link:../../packages/config
@@ -47,6 +56,9 @@ importers:
       '@walletwise/db':
         specifier: workspace:*
         version: link:../../infra/db
+      ai:
+        specifier: ^6.0.49
+        version: 6.0.196(zod@3.25.76)
       fastify:
         specifier: ^4.28.1
         version: 4.29.1
