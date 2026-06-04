@@ -19,5 +19,8 @@
     "turbo": "^2.0.0",
     "typescript": "^5.5.2",
     "prettier": "^3.3.2"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": ["@prisma/client", "@prisma/engines", "esbuild", "prisma"]
   }
 }
