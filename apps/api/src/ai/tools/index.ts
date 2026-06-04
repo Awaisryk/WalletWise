@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import type { Tool } from 'ai';
+import { periodDelta } from '@walletwise/contracts';
 import type { PrismaService } from '../../prisma/prisma.service';
 import { createTool } from './tool-wrapper';
 
@@ -107,20 +108,69 @@ export function buildTools({
     }),
 
     /**
-     * Current period vs baseline. Stub for now — the real implementation reads
-     * MonthlyRollup in Phase 5.
+     * Current month vs the trailing baseline average. Reads precomputed
+     * `MonthlyRollup` rows ONLY (never raw transactions) — these are the scale
+     * lever per spec §9. Scoped to `userId`; `totalAmount` rollups are already
+     * positive spend totals (`sum(abs(amount))`).
+     *
+     * Aggregation: pull the user's rollup rows (optionally filtered to one
+     * category) newest-first, sum `totalAmount` per month (collapsing the
+     * per-category rows into one figure per month when no category filter is
+     * given), then treat the most recent month as `current` and the next
+     * `months` months (default 3) as the baseline window.
      */
     compare_periods: createTool({
       name: 'compare_periods',
       description:
-        'Compare spending in a current period against a baseline period (e.g. this month vs the trailing average). Reads precomputed monthly rollups.',
+        'Compare the user\'s most recent month of spending against the trailing baseline average, using precomputed monthly rollups (not raw transactions). Optionally restrict to one category. "months" is the baseline window length (default 3). Returns the current-month total, the baseline average, and the percent change (deltaPct, null when there is no usable baseline).',
       inputSchema: z.object({
         category: z.string().optional(),
-        period: z.string().optional(),
-        baseline: z.string().optional(),
+        months: z.number().optional().describe('baseline window, default 3'),
       }),
-      execute: async () => {
-        return { note: 'implemented in Phase 5', ignoreLog: true };
+      execute: async ({ category, months }) => {
+        const rows = await prisma.monthlyRollup.findMany({
+          where: { userId, ...(category ? { category } : {}) },
+          orderBy: { month: 'desc' },
+        });
+
+        if (rows.length === 0) {
+          return {
+            current: 0,
+            baseline: 0,
+            deltaPct: null,
+            note: 'no rollup data yet',
+            inputSummary: { category, months },
+          };
+        }
+
+        // Sum totalAmount per month (across categories when unfiltered),
+        // preserving the descending month order. A Map keyed by the month's ISO
+        // string collapses the per-category rows into one total per month.
+        const perMonth = new Map<string, { month: Date; total: number }>();
+        for (const r of rows) {
+          const key = r.month.toISOString();
+          const entry = perMonth.get(key);
+          if (entry) {
+            entry.total += Number(r.totalAmount);
+          } else {
+            perMonth.set(key, { month: r.month, total: Number(r.totalAmount) });
+          }
+        }
+        // Map preserves insertion order, which is already month-descending.
+        const monthlyTotals = [...perMonth.values()];
+
+        const window = months ?? 3;
+        const current = monthlyTotals[0]!.total;
+        const baselineMonths = monthlyTotals.slice(1, 1 + window).map((m) => m.total);
+        const d = periodDelta({ current, baselineMonths });
+
+        return {
+          current: d.current,
+          baseline: d.baseline,
+          deltaPct: d.deltaPct,
+          currentMonth: monthlyTotals[0]!.month.toISOString(),
+          inputSummary: { category, months: window },
+        };
       },
     }),
 

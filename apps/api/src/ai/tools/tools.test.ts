@@ -8,6 +8,7 @@ jest.mock('../../redis/redis.service', () => ({
   },
 }));
 
+import { periodDelta } from '@walletwise/contracts';
 import { buildTools } from './index';
 
 function makePrisma() {
@@ -19,11 +20,18 @@ function makePrisma() {
   const factFindMany = jest.fn(async () => [
     { key: 'payday', value: '1st', kind: 'income' },
   ]);
+  // Two months for the same category, newest-first (matches the tool's
+  // orderBy: { month: 'desc' }). `totalAmount` is a positive spend total.
+  const rollupFindMany = jest.fn(async () => [
+    { userId: 'u1', month: new Date('2026-05-01T00:00:00Z'), category: 'groceries', txnCount: 4, totalAmount: 300 },
+    { userId: 'u1', month: new Date('2026-04-01T00:00:00Z'), category: 'groceries', txnCount: 3, totalAmount: 200 },
+  ]);
   const prisma: any = {
     transaction: { aggregate, findMany },
     userFact: { create: factCreate, findMany: factFindMany },
+    monthlyRollup: { findMany: rollupFindMany },
   };
-  return { prisma, aggregate, findMany, factCreate, factFindMany };
+  return { prisma, aggregate, findMany, factCreate, factFindMany, rollupFindMany };
 }
 
 describe('buildTools', () => {
@@ -131,10 +139,36 @@ describe('buildTools', () => {
     expect(r.facts).toEqual([{ key: 'payday', value: '1st', kind: 'income' }]);
   });
 
-  it('compare_periods is a Phase 5 stub', async () => {
-    const { prisma } = makePrisma();
+  it('compare_periods reads MonthlyRollup scoped to userId and returns periodDelta', async () => {
+    const { prisma, rollupFindMany } = makePrisma();
     const tools = buildTools({ prisma, userId: 'u1' });
     const r: any = await tools.compare_periods.execute({ category: 'groceries' }, {} as any);
-    expect(r).toEqual({ note: 'implemented in Phase 5' });
+
+    // Reads rollups only, scoped by userId, with the category filter applied.
+    expect(rollupFindMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ userId: 'u1', category: 'groceries' }),
+        orderBy: { month: 'desc' },
+      }),
+    );
+
+    // current = newest month (300); baseline = trailing month(s) avg (200).
+    const expected = periodDelta({ current: 300, baselineMonths: [200] });
+    expect(r.current).toBe(expected.current);
+    expect(r.baseline).toBe(expected.baseline);
+    expect(r.deltaPct).toBeCloseTo(expected.deltaPct as number);
+    expect(r.deltaPct).toBeCloseTo(50);
+    expect(r.currentMonth).toBe('2026-05-01T00:00:00.000Z');
+  });
+
+  it('compare_periods returns a no-data result when there are no rollups', async () => {
+    const { prisma, rollupFindMany } = makePrisma();
+    rollupFindMany.mockResolvedValueOnce([]);
+    const tools = buildTools({ prisma, userId: 'u1' });
+    const r: any = await tools.compare_periods.execute({}, {} as any);
+    expect(rollupFindMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: expect.objectContaining({ userId: 'u1' }) }),
+    );
+    expect(r).toEqual({ current: 0, baseline: 0, deltaPct: null, note: 'no rollup data yet' });
   });
 });
