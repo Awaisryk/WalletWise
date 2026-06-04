@@ -45,25 +45,13 @@ export interface RunChatParams {
 export interface RunChatOptions {
   /**
    * Invoked when the underlying `streamText` finishes. The controller uses this
-   * to read the turn's usage and roll the cumulative cost into Redis. Mirrors
-   * resume-plus's orchestrator `opts.onFinish` — the event is forwarded as-is.
+   * to read the turn's usage and roll the cumulative cost into Redis.
    */
   onFinish?: (event?: any) => void | Promise<void>;
 }
 
 /**
  * Runs one WalletWise chat turn through ai-sdk v6 `streamText`.
- *
- * This mirrors resume-plus's `ChatOrchestrator.chatResumeV2` `streamText` scaffold
- * (apps/server/src/ai/conversation/orchestrator.ts) MINUS the resume/coach
- * domain pre-processing: no tools, snapshot, goal, plan, Stripe plan resolution,
- * history compaction, or active-tool selection. What's kept verbatim:
- *
- *   - the UI-vs-model message detection + `convertToModelMessages`
- *   - `stopWhen: stepCountIs(8)` so wiring tools later is a one-line change
- *   - `includeRawChunks` + the dedup'd provider-error logger fed by `onChunk`
- *     (raw chunks) and `onError`
- *   - `maxRetries: 0` and the provider options / temperature pulled from AIHelper
  *
  * Model, temperature, and provider options are resolved from {@link AIHelper}
  * for the CHAT task so provider strings never leak into the controller. Returns
@@ -77,8 +65,7 @@ export async function runChat(
   const { env, cfg, messages, system, tools } = params;
 
   // UI messages carry a `parts` array; convert them to model messages. Plain
-  // model-message arrays (no `parts`) are passed through untouched. Mirrors the
-  // resume-plus detection (`incoming[0]?.parts`).
+  // model-message arrays (no `parts`) are passed through untouched.
   const incoming = Array.isArray(messages) ? messages : [];
   const modelMessages: ModelMessage[] =
     incoming.length > 0 && (incoming[0] as { parts?: unknown }).parts
@@ -88,10 +75,10 @@ export async function runChat(
   const providerOptions = AIHelper.getProviderOptions(AITask.CHAT, env);
   const chatModelConfig = AIHelper.getModelConfig(AITask.CHAT, env);
 
-  // Provider-error logging helper, copied from resume-plus's orchestrator. Groq's
-  // gpt-oss models occasionally surface `tool_use_failed` / `json_validate_failed`
-  // generation errors inside raw chunks or the stream error; we log them once
-  // (deduped) for debugging without exposing them to the user.
+  // Groq's gpt-oss models occasionally surface `tool_use_failed` /
+  // `json_validate_failed` generation errors inside raw chunks or the stream
+  // error; we log them once (deduped) for debugging without exposing them to
+  // the user.
   const loggedProviderErrors = new Set<string>();
   const logProviderError = (source: string, payload: unknown) => {
     const info = extractProviderErrorInfo(payload);

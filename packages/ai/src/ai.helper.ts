@@ -3,9 +3,9 @@ import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
 import type { LanguageModel } from 'ai';
 
 /**
- * Return the first argument that is (or parses to) a finite number. Lifted from
- * resume-plus's ai.helper so {@link AIHelper.normalizeUsage} can coalesce token
- * counts that arrive under different keys / shapes across providers.
+ * Return the first argument that is (or parses to) a finite number so
+ * {@link AIHelper.normalizeUsage} can coalesce token counts that arrive under
+ * different keys / shapes across providers.
  */
 function firstFiniteNumber(...values: unknown[]): number | undefined {
   for (const value of values) {
@@ -104,14 +104,11 @@ export class AIHelper {
   }
 
   /**
-   * USD cost of one model call. Lifted from resume-plus's
-   * {@link AIHelper.calculateCost} (apps/server/src/ai/ai.helper.ts) with the
-   * per-provider price table trimmed to the two providers WalletWise uses:
+   * USD cost of one model call, using the price table for the providers
+   * WalletWise uses:
    *
    *   groq gpt-oss-120b   -> $0.15 / M input, $0.75 / M output, cached = 50% input
-   *                          (resume-plus's documented Groq gpt-oss-120b pricing)
    *   groq llama-4-scout  -> $0.10 / M input, $0.10 / M output, cached = 50% input
-   *                          (resume-plus's scout pricing — the GROQ else-branch)
    *   local               -> $0 (dev runs against a local OpenAI-compatible server)
    *
    * Token counts are coalesced through {@link normalizeUsage} so the ai-sdk v6
@@ -197,8 +194,8 @@ export class AIHelper {
   /**
    * Normalize a usage object into a flat `{ inputTokens, outputTokens,
    * reasoningTokens, cachedInputTokens, totalTokens, nonCachedInputTokens }`
-   * shape. Lifted from resume-plus's {@link AIHelper.normalizeUsage} — tolerates
-   * the ai-sdk v6 usage shape plus assorted raw provider payload keys.
+   * shape. Tolerates the ai-sdk v6 usage shape plus assorted raw provider
+   * payload keys.
    */
   static normalizeUsage(usage?: {
     inputTokens?: number;

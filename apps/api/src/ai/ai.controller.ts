@@ -41,22 +41,18 @@ export class AiController {
   ) {}
 
   /**
-   * Streaming chat turn. Mirrors resume-plus's `AIController.resumeV2`
-   * response-piping core (apps/server/src/ai/ai.controller.ts): build a
-   * `createUIMessageStream`, run the model inside `execute`, `writer.merge` the
-   * model's UI-message stream with a `messageMetadata` hook that attaches the
-   * per-turn cost + cumulative session cost, then pipe to the HTTP response.
+   * Streaming chat turn. Builds a `createUIMessageStream`, runs the model
+   * inside `execute`, merges the model's UI-message stream with a
+   * `messageMetadata` hook that attaches per-turn cost + cumulative session
+   * cost, then pipes to the HTTP response.
    *
-   * Differences from resume-plus, all intentional for this phase:
-   *   - the finance tool catalog is wired (constructed per-request, scoped to
-   *     the session `userId`); no snapshot / goal / plan / quota / message
-   *     persistence yet (those land in later phases)
+   * Implementation notes:
+   *   - the finance tool catalog is constructed per-request and scoped to the
+   *     session `userId`
    *   - `onFinish` is a no-op log (no DB writes yet)
    *   - cumulative cost lives at `walletwise:cost:${conversationId}` (24h TTL)
    *   - the response is Fastify's: we `reply.hijack()` and hand the SDK
-   *     `reply.raw` (a Node `ServerResponse`) in place of Express's `res`. The
-   *     `pipeUIMessageStreamToResponse({ response, stream })` argument shape is
-   *     identical to resume-plus.
+   *     `reply.raw` (a Node `ServerResponse`)
    */
   @Post('chat')
   @UseGuards(SessionGuard)
@@ -136,8 +132,7 @@ export class AiController {
                 const cost = AIHelper.calculateCost(usage, AITask.CHAT, env);
                 const cumulativeCost = (prevCost || 0) + (cost || 0);
 
-                // Persist the new cumulative cost (best-effort). Mirrors
-                // resume-plus's `resume:v2:cost:*` 24h-TTL pattern.
+                // Persist the new cumulative cost (best-effort).
                 if (costKey) {
                   void (async () => {
                     try {
@@ -165,9 +160,6 @@ export class AiController {
 
     // Hand the response lifecycle to the AI SDK. `hijack()` stops Fastify from
     // sending its own reply; `reply.raw` is the underlying Node ServerResponse.
-    // resume-plus calls `pipeUIMessageStreamToResponse({ response: res, stream })`
-    // with Express's `res`; Fastify's `reply.raw` is the same Node type, so the
-    // argument object is identical.
     reply.hijack();
     pipeUIMessageStreamToResponse({ response: reply.raw, stream });
   }
