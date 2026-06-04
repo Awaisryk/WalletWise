@@ -7,9 +7,11 @@ import {
   WALLETWISE_QUEUE,
   type ImportCsvPayload,
   type JobName,
+  type RollupRebuildPayload,
 } from '@walletwise/contracts';
 import { WORKER_CONFIG } from '../config/worker-config.module';
 import { ImportCsvProcessor } from './import-csv.processor';
+import { RollupProcessor } from './rollup.processor';
 
 /**
  * BullMQ Worker for the `WALLETWISE_QUEUE`. We instantiate the Worker manually
@@ -35,6 +37,7 @@ export class Dispatcher implements OnModuleInit, OnModuleDestroy {
   constructor(
     @Inject(WORKER_CONFIG) private readonly env: WorkerEnv,
     private readonly importCsv: ImportCsvProcessor,
+    private readonly rollup: RollupProcessor,
   ) {}
 
   onModuleInit(): void {
@@ -73,9 +76,7 @@ export class Dispatcher implements OnModuleInit, OnModuleDestroy {
         await this.importCsv.process(job.data as ImportCsvPayload);
         return;
       case JOBS.ROLLUP_REBUILD:
-        // Placeholder — the real rollup rebuild lands in Phase 5b, which
-        // replaces this branch with the rollup processor.
-        this.log.log('rollup rebuild (implemented in 5b)');
+        await this.rollup.process(job.data as RollupRebuildPayload);
         return;
       case JOBS.RECEIPT_OCR:
         throw new Error('receipt.ocr not implemented (stretch)');

@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { Dispatcher } from './dispatcher';
 import { ImportCsvProcessor } from './import-csv.processor';
 import { JobProducer } from './job-producer';
+import { RollupProcessor } from './rollup.processor';
 
 /**
  * Wires the BullMQ consumer side: the `Dispatcher` (Worker lifecycle + dispatch
@@ -10,6 +11,6 @@ import { JobProducer } from './job-producer';
  * Prisma/config modules.
  */
 @Module({
-  providers: [Dispatcher, ImportCsvProcessor, JobProducer],
+  providers: [Dispatcher, ImportCsvProcessor, RollupProcessor, JobProducer],
 })
 export class ProcessorsModule {}
