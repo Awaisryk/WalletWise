@@ -32,6 +32,14 @@ export interface RunChatParams {
   messages: UIMessage[] | ModelMessage[];
   /** The base system prompt for the turn. */
   system: string;
+  /**
+   * The finance tool catalog for this turn, constructed per-request by
+   * `buildTools({ prisma, userId })`. The tools close over the server-side
+   * `userId`, so every query they run is scoped to the current user — the model
+   * never supplies an identity. Optional so server-internal callers/tests can
+   * run a tool-less turn.
+   */
+  tools?: ToolSet;
 }
 
 export interface RunChatOptions {
@@ -66,7 +74,7 @@ export async function runChat(
   params: RunChatParams,
   opts?: RunChatOptions,
 ): Promise<StreamTextResult<ToolSet, never>> {
-  const { env, cfg, messages, system } = params;
+  const { env, cfg, messages, system, tools } = params;
 
   // UI messages carry a `parts` array; convert them to model messages. Plain
   // model-message arrays (no `parts`) are passed through untouched. Mirrors the
@@ -108,8 +116,11 @@ export async function runChat(
     model: AIHelper.getModel(AITask.CHAT, env, cfg),
     system,
     messages: modelMessages,
-    // No tools yet — the finance tool catalog lands in Phase 4. The step cap is
-    // already in place so adding tools later is a one-line change.
+    // The finance tool catalog (query_spending, list_transactions, memory, …).
+    // When omitted (server-internal/test turns) the model just answers from the
+    // prompt. `toolChoice: 'auto'` lets the model decide whether to call a tool;
+    // `stepCountIs(8)` bounds the gather→answer loop.
+    ...(tools ? { tools, toolChoice: 'auto' as const } : {}),
     stopWhen: stepCountIs(8),
     temperature: AIHelper.getTemperature(AITask.CHAT, env),
     maxRetries: 0,

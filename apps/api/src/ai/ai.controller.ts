@@ -6,8 +6,10 @@ import { AIHelper, AITask } from '@walletwise/ai';
 import { SessionGuard } from '../auth/session.guard';
 import { User } from '../auth/user.decorator';
 import { API_CONFIG } from '../config/api-config.module';
+import { PrismaService } from '../prisma/prisma.service';
 import { redisClient } from '../redis/redis.service';
 import { runChat } from './orchestrator';
+import { buildTools } from './tools';
 
 /** Body of `POST /ai/chat`. The chat client sends ai-sdk UI messages. */
 interface ChatBody {
@@ -16,9 +18,11 @@ interface ChatBody {
 }
 
 /**
- * Base system prompt for the finance assistant. Phase 4 will add the finance
- * tool catalog (query/compare/list transactions); the prompt already tells the
- * model to lean on tools and never invent figures.
+ * Base system prompt for the finance assistant. The finance tool catalog
+ * (query_spending / list_transactions / compare_periods / memory) is wired in
+ * `chat()`; the prompt tells the model to lean on tools and never invent
+ * figures. At request time the user's remembered facts are appended as a
+ * "Known facts about the user" block.
  */
 const BASE_SYSTEM_PROMPT = [
   'You are WalletWise, a personal finance assistant.',
@@ -31,7 +35,10 @@ const BASE_SYSTEM_PROMPT = [
 export class AiController {
   private readonly logger = new Logger(AiController.name);
 
-  constructor(@Inject(API_CONFIG) private readonly env: ApiEnv) {}
+  constructor(
+    @Inject(API_CONFIG) private readonly env: ApiEnv,
+    private readonly prisma: PrismaService,
+  ) {}
 
   /**
    * Streaming chat turn. Mirrors resume-plus's `AIController.resumeV2`
@@ -41,8 +48,9 @@ export class AiController {
    * per-turn cost + cumulative session cost, then pipe to the HTTP response.
    *
    * Differences from resume-plus, all intentional for this phase:
-   *   - no tools / snapshot / goal / plan / quota / message persistence
-   *     (those land in Phase 4 and later)
+   *   - the finance tool catalog is wired (constructed per-request, scoped to
+   *     the session `userId`); no snapshot / goal / plan / quota / message
+   *     persistence yet (those land in later phases)
    *   - `onFinish` is a no-op log (no DB writes yet)
    *   - cumulative cost lives at `walletwise:cost:${conversationId}` (24h TTL)
    *   - the response is Fastify's: we `reply.hijack()` and hand the SDK
@@ -64,6 +72,13 @@ export class AiController {
     };
     const conversationId = body.conversationId;
     const costKey = conversationId ? `walletwise:cost:${conversationId}` : '';
+
+    // Construct the finance tool catalog for this request. The tools close over
+    // the server-side `userId` resolved from the SuperTokens session, so every
+    // Prisma query they run is scoped to the current user. The LLM only supplies
+    // non-identity inputs (dates, category, merchant, limit) — it can never set
+    // `userId`.
+    const tools = buildTools({ prisma: this.prisma, userId });
 
     // onFinish is intentionally minimal for this phase — no message persistence
     // yet (Phase 4/later). Just log the turn finish reason for observability.
@@ -91,7 +106,22 @@ export class AiController {
           /* Redis down — start the cumulative from 0 for this turn. */
         }
 
-        const result = await runChat({ env, cfg, messages: body.messages, system: BASE_SYSTEM_PROMPT }, { onFinish });
+        // Load the user's remembered facts and prepend a compact block to the
+        // system prompt so the assistant applies memory from the first token
+        // (without forcing a get_user_facts tool round-trip). Best-effort: if
+        // the read fails we just run with the base prompt.
+        let system = BASE_SYSTEM_PROMPT;
+        try {
+          const facts = await this.prisma.userFact.findMany({ where: { userId } });
+          if (facts.length > 0) {
+            const factLines = facts.map((f) => `- ${f.key}: ${f.value} (${f.kind})`).join('\n');
+            system = `${BASE_SYSTEM_PROMPT}\n\nKnown facts about the user:\n${factLines}`;
+          }
+        } catch (err) {
+          this.logger.warn(`[ai/chat] failed to load user facts user=${userId}: ${String(err)}`);
+        }
+
+        const result = await runChat({ env, cfg, messages: body.messages, system, tools }, { onFinish });
 
         // Pipe the model stream into the UI stream. The `messageMetadata` hook
         // fires on `finish` with the turn's `totalUsage`; we compute the turn
