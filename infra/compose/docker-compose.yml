@@ -1,0 +1,160 @@
+name: walletwise
+
+# Production-grade local stack:
+# - postgres (app DB) + supertokens-db (auth DB) on separate Postgres instances
+# - redis for cache + BullMQ
+# - supertokens core
+# - migrate: one-shot Prisma migrate deploy that other services wait on
+# - api + worker: app code (built locally)
+#
+# All env values come from .env.dev via `env_file:`. No secrets in this YAML.
+# Healthchecks gate dependent services. The architecture maps 1:1 to a K8s
+# deployment: Postgres/Redis -> StatefulSet, supertokens/api/worker ->
+# Deployment, migrate -> Job.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    env_file:
+      - .env.dev
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-walletwise}
+      POSTGRES_USER: ${POSTGRES_USER:-walletwise}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-walletwise}
+    ports:
+      - '${POSTGRES_HOST_PORT:-5432}:5432'
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./initdb:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-walletwise} -d ${POSTGRES_DB:-walletwise}']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  supertokens-db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    env_file:
+      - .env.dev
+    environment:
+      POSTGRES_DB: ${ST_POSTGRES_DB:-supertokens}
+      POSTGRES_USER: ${ST_POSTGRES_USER:-supertokens}
+      POSTGRES_PASSWORD: ${ST_POSTGRES_PASSWORD:-supertokens}
+    volumes:
+      - supertokens_data:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        [
+          'CMD-SHELL',
+          'pg_isready -U ${ST_POSTGRES_USER:-supertokens} -d ${ST_POSTGRES_DB:-supertokens}',
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  supertokens:
+    image: registry.supertokens.io/supertokens/supertokens-postgresql:9.3
+    restart: unless-stopped
+    depends_on:
+      supertokens-db:
+        condition: service_healthy
+    env_file:
+      - .env.dev
+    environment:
+      POSTGRESQL_CONNECTION_URI: postgresql://${ST_POSTGRES_USER:-supertokens}:${ST_POSTGRES_PASSWORD:-supertokens}@supertokens-db:5432/${ST_POSTGRES_DB:-supertokens}
+      API_KEYS: ${SUPERTOKENS_API_KEY:-dev-key-1234567890-abcdef1234}
+    ports:
+      - '${SUPERTOKENS_HOST_PORT:-3567}:3567'
+    healthcheck:
+      test:
+        - CMD
+        - bash
+        - -c
+        - 'exec 3<>/dev/tcp/127.0.0.1/3567 && echo -e "GET /hello HTTP/1.0\r\n\r\n" >&3 && cat <&3 | grep -q "Hello"'
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ['redis-server', '--save', '', '--appendonly', 'no']
+    ports:
+      - '${REDIS_HOST_PORT:-6379}:6379'
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # One-shot Prisma migrate. CI gates the API/worker on this exiting 0.
+  # Locally: `pnpm db:migrate` runs only this service.
+  migrate:
+    build:
+      context: ../..
+      dockerfile: infra/compose/migrate.Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - .env.dev
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-walletwise}:${POSTGRES_PASSWORD:-walletwise}@postgres:5432/${POSTGRES_DB:-walletwise}?schema=public
+    restart: 'no'
+
+  api:
+    build:
+      context: ../..
+      dockerfile: apps/api/Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      supertokens:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    env_file:
+      - .env.dev
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-walletwise}:${POSTGRES_PASSWORD:-walletwise}@postgres:5432/${POSTGRES_DB:-walletwise}?schema=public
+      DATABASE_URL_RO: postgresql://walletwise_ro:walletwise_ro@postgres:5432/${POSTGRES_DB:-walletwise}?schema=public
+      REDIS_URL: redis://redis:6379
+      SUPERTOKENS_CORE_URL: http://supertokens:3567
+      API_DOMAIN: http://localhost:${API_HOST_PORT:-4000}
+    ports:
+      - '${API_HOST_PORT:-4000}:4000'
+    healthcheck:
+      test: ['CMD', 'wget', '-qO-', 'http://localhost:4000/v1/health']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  worker:
+    build:
+      context: ../..
+      dockerfile: apps/worker/Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      supertokens:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    env_file:
+      - .env.dev
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-walletwise}:${POSTGRES_PASSWORD:-walletwise}@postgres:5432/${POSTGRES_DB:-walletwise}?schema=public
+      DATABASE_URL_RO: postgresql://walletwise_ro:walletwise_ro@postgres:5432/${POSTGRES_DB:-walletwise}?schema=public
+      REDIS_URL: redis://redis:6379
+      SUPERTOKENS_CORE_URL: http://supertokens:3567
+
+volumes:
+  postgres_data:
+  supertokens_data:
