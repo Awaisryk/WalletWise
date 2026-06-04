@@ -212,16 +212,16 @@ Streamed to the client with `pipeUIMessageStreamToResponse`. Client consumes via
 | `list_transactions` | `{ category?, from, to, sort, limit<=50 }` | raw, capped | rows (id, date, merchant, amount, category) |
 | `save_user_fact` | `{ key, value, kind }` | — | `{ ok }` |
 | `get_user_facts` | `{ kind? }` | UserFact | facts[] |
-| `run_readonly_sql` | `{ sql }` | read-only role under RLS | rows (capped) |
+| `run_readonly_sql` *(stretch)* | `{ sql }` | read-only role under RLS | rows (capped) |
 
 **Tool design rules:**
 - Tools return aggregates or capped rows — never an unbounded dump.
 - Every tool is scoped to the current user (RLS + explicit `userId`).
-- The fixed tools cover the common questions cheaply; `run_readonly_sql` is the fallback for the long tail.
+- The fixed tools cover the common questions cheaply; `run_readonly_sql` *(stretch)* is the fallback for the long tail.
 
 ---
 
-## 8. The `run_readonly_sql` safe fallback
+## 8. The `run_readonly_sql` safe fallback  *(STRETCH — build only if time remains)*
 
 Defense in depth — four independent layers:
 
@@ -240,24 +240,26 @@ All three mechanisms are built, not just described:
 
 1. **Aggregation in the query layer.** `query_spending` is `SUM(...) GROUP BY` — cost is flat in ledger size; the model sees a few numbers.
 2. **Worker-maintained `MonthlyRollup`.** CSV import and new transactions enqueue a rollup job; `compare_periods` reads only rollups (dozens of rows) no matter how many years exist. This also makes "unusual activity" (#4) and "compare across time" (#5) nearly free.
-3. **Bounded fallback.** `run_readonly_sql` cannot scan unboundedly (timeout + LIMIT + RLS).
+3. **Bounded fallback (stretch).** `run_readonly_sql` cannot scan unboundedly (timeout + LIMIT + RLS). Not in the MVP; mechanisms 1–2 carry the core scale story on their own.
 
 **Described in the design note (not built):** Redis caching of hot aggregates, monthly table partitioning, read replicas, the import queue as the 100× ingestion path, an index review for new query shapes.
 
 ---
 
-## 10. Feature plan — built vs stubbed
+## 10. Feature plan — MVP vs stretch vs stubbed
 
-**Built for real:**
+**MVP — built for real:**
 - Auth + multi-user (SuperTokens + RLS isolation).
 - CSV import via worker: dedup, missing-field coercion/skip, junk rows surfaced in `ImportJob.report`.
 - #1 Answer spending questions (`query_spending`, `list_transactions`).
-- #2 Receipt OCR (upload → worker vision → transaction) — *first to cut if time runs short.*
 - #5 Compare across time (`compare_periods` on rollups).
 - #10 Remember user context (`save_user_fact` / `get_user_facts`, facts injected into system prompt).
-- The `run_readonly_sql` safe fallback.
 
-**Stubbed / described (infra makes them close, but not claimed unless they work):** #3 subscriptions, #4 anomaly flag, #6 budgets (schema present, tracking stubbed), #7 merchant web-lookup, #8 summarize, #9 cut-back. The note explains how each slots onto existing tools.
+**Stretch — build only if time remains (in priority order):**
+1. The `run_readonly_sql` safe fallback (§8) — the fixed tools cover the assessed core questions without it; this extends coverage to the open-ended long tail.
+2. #2 Receipt OCR (upload → worker vision → transaction).
+
+**Stubbed / described (infra makes them close, but not claimed unless they work):** #3 subscriptions, #4 anomaly flag, #6 budgets (schema present, tracking stubbed), #7 merchant web-lookup, #8 summarize, #9 cut-back. The note explains how each slots onto the existing tools. RLS remains in the MVP regardless — it is the multi-user isolation mechanism for every query.
 
 ---
 
@@ -320,12 +322,13 @@ Validated by `packages/config` (zod) at boot; api and worker each have their own
 | 1 | Prisma schema + migrations + **RLS** + CSV seed script | dedupe-hash unit | 0:45 |
 | 2 | SuperTokens auth + user sync (signUp override) + protected routes | — | 0:30 |
 | 3 | `packages/ai` AIHelper port + `/ai/chat` streaming + web chat UI (useChat + shadcn) | AIHelper model selection | 1:00 |
-| 4 | Tools: `query_spending`, `list_transactions`, facts, `run_readonly_sql` + validator | validator + tool handlers | 1:00 |
+| 4 | Tools: `query_spending`, `list_transactions`, facts (wired into chat) | tool handlers | 0:45 |
 | 5 | Worker + queue: CSV import job + rollup maintenance + `compare_periods` | CSV import, rollup math | 1:00 |
-| 6 | Receipt OCR: upload → worker vision job → transaction | extraction parsing | 0:45 |
 | 7 | README/design note + test pass + polish | — | 0:15+ |
+| **S1** *(stretch)* | Safe `run_readonly_sql` fallback: validator + RO executor + wire into tools | validator (injection) | 1:00 |
+| **S2** *(stretch)* | Receipt OCR: upload → worker vision job → transaction | extraction parsing | 0:45 |
 
-**MVP cut line = end of Phase 5** (working multi-user assistant: spending + trend questions over imported data + safe SQL fallback). **Phase 6 is the first to drop** under time pressure.
+**MVP = Phases 0→5 then Phase 7** (working multi-user assistant: spending + trend questions over imported data, with memory). Stretch items **S1 then S2**, in that priority order, only if time remains. RLS is built in Phase 1 (MVP) because it is required for multi-user isolation; it also backstops S1 if/when that lands.
 
 ---
 
@@ -345,6 +348,6 @@ Validated by `packages/config` (zod) at boot; api and worker each have their own
 - `docker compose up` brings the stack up; migrations + RLS applied.
 - A user can sign up, import the sample CSV, and ask: "how much did I spend on groceries last month?", "what was my biggest purchase in March?", "am I spending more than usual this month?" — and get correct, fast answers backed by the DB, not the prompt.
 - The assistant remembers a stated fact and applies it.
-- The read-only SQL fallback answers an off-catalog question and provably cannot escape the user's rows or write.
+- *(Stretch)* The read-only SQL fallback answers an off-catalog question and provably cannot escape the user's rows or write.
 - Unit tests pass for the high-value targets in §12.
 - README explains approach, decisions, trade-offs, and exactly what is stubbed/skipped.

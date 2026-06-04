@@ -14,6 +14,8 @@
 
 **Spec:** `docs/superpowers/specs/2026-06-05-walletwise-design.md` — the source of truth. Do not diverge.
 
+**Execution order (re-scoped 2026-06-05):** Build Phases 0→5, then Phase 7 (README + tests) = the **MVP**. Then, only if time remains, the stretch tasks in priority order: **S1** (the safe `run_readonly_sql` fallback — Tasks 4.1, 4.2, and the S1 wire step) and **S2** (Receipt OCR — Phase 6). Tasks/phases marked **(STRETCH)** are skipped in the MVP pass. RLS (Task 1.2) stays in the MVP — it is multi-user isolation for every query, not just the fallback.
+
 **Conventions for this plan:**
 - "COPY FROM <path>" = read that reference file and reproduce it, renaming `bugsport`/`resume-plus` identifiers to `walletwise`. These are commodity; don't redesign them.
 - Code blocks marked as full content are WalletWise-specific and must be written as shown.
@@ -607,9 +609,11 @@ git add -A && git commit -m "feat(web): vite+tailwind+shadcn chat shell with use
 
 ---
 
-## Phase 4 — Tools + safe read-only SQL fallback
+## Phase 4 — Tools (fixed catalog)   ·   safe SQL fallback is STRETCH S1
 
-### Task 4.1: The SQL validator (security-critical, TDD first)
+> MVP for this phase is **Task 4.3 only** (the fixed tool catalog). Tasks 4.1 and 4.2 below are **STRETCH S1** — implement them, plus the S1 wire step in 4.2, only after the MVP (Phases 0–5 + 7) is done.
+
+### Task 4.1 (STRETCH S1): The SQL validator (security-critical, TDD first)
 
 **Files:**
 - Create: `apps/api/src/ai/tools/sql-validator.ts`
@@ -681,7 +685,7 @@ export function validateReadonlySql(raw: string): ValidationResult {
 git add -A && git commit -m "feat(api): read-only SQL validator with injection-attempt tests"
 ```
 
-### Task 4.2: Read-only SQL executor
+### Task 4.2 (STRETCH S1): Read-only SQL executor
 
 **Files:**
 - Create: `apps/api/src/ai/tools/readonly-sql.service.ts`
@@ -694,16 +698,18 @@ git add -A && git commit -m "feat(api): read-only SQL validator with injection-a
 
 - [ ] **Step 2: Manual verify** — call with a SELECT as user A; confirm it returns only A's rows even with `WHERE userId = '<B>'` (RLS strips them).
 
-- [ ] **Step 3: Commit**
+- [ ] **Step 3 (S1 wire): add `run_readonly_sql` to the tool catalog** — extend `buildTools` to optionally accept `sql` (`buildTools({ prisma, userId, sql? })`); when `sql` is provided, include a `run_readonly_sql` tool with zod input `{ sql: z.string() }` whose `execute` calls `sql.run(userId, input.sql)` and returns the capped rows (or a structured error on rejection). Update `ai.controller.ts` to construct the RO executor and pass it in. Add a unit test asserting a write statement is rejected end-to-end.
+
+- [ ] **Step 4: Commit**
 
 ```bash
-git add -A && git commit -m "feat(api): sandboxed read-only SQL executor (RO role + RLS + timeout + limit)"
+git add -A && git commit -m "feat(api): sandboxed read-only SQL executor (RO role + RLS + timeout + limit) wired as run_readonly_sql tool"
 ```
 
-### Task 4.3: Tool catalog + wire into chat
+### Task 4.3: Tool catalog + wire into chat   (MVP — fixed tools only)
 
 **Files:**
-- Create: `apps/api/src/ai/tools/index.ts` (query_spending, list_transactions, compare_periods placeholder, save_user_fact, get_user_facts, run_readonly_sql)
+- Create: `apps/api/src/ai/tools/index.ts` (query_spending, list_transactions, compare_periods placeholder, save_user_fact, get_user_facts) — `run_readonly_sql` is added later in STRETCH S1
 - Test: `apps/api/src/ai/tools/tools.test.ts`
 
 - [ ] **Step 1: Write failing tests** for `query_spending` and `list_transactions` against a mocked `PrismaService.withUser` (assert SUM aggregation shape and that limit is capped at 50).
@@ -720,7 +726,7 @@ const fakePrisma = {
 
 describe('query_spending tool', () => {
   it('returns absolute total and count', async () => {
-    const tools = buildTools({ prisma: fakePrisma as any, userId: 'u1', sql: {} as any });
+    const tools = buildTools({ prisma: fakePrisma as any, userId: 'u1' });
     const r = await tools.query_spending.execute({ from: '2026-03-01', to: '2026-04-01', category: 'groceries' }, {} as any);
     expect(r.total).toBe(42.5);
     expect(r.txnCount).toBe(3);
@@ -729,7 +735,7 @@ describe('query_spending tool', () => {
 
 describe('list_transactions tool', () => {
   it('caps limit at 50', async () => {
-    const tools = buildTools({ prisma: fakePrisma as any, userId: 'u1', sql: {} as any });
+    const tools = buildTools({ prisma: fakePrisma as any, userId: 'u1' });
     const r = await tools.list_transactions.execute({ from: '2026-03-01', to: '2026-04-01', limit: 999, sort: 'amount_desc' }, {} as any);
     expect(r.length).toBeLessThanOrEqual(50);
   });
@@ -738,7 +744,7 @@ describe('list_transactions tool', () => {
 
 - [ ] **Step 2: Run, verify FAIL.**
 
-- [ ] **Step 3: Implement `index.ts`** — `buildTools({ prisma, userId, sql, env, cfg })` returns ai-sdk `tool()` definitions with zod input schemas. Each data tool calls `prisma.withUser(userId, tx => …)`. `query_spending` → `tx.transaction.aggregate({ _sum: { amount }, _count: true, where })`, return `{ total: Math.abs(Number(sum)||0), txnCount, currency: 'USD' }`. `list_transactions` → `findMany` with `take: Math.min(input.limit ?? 20, 50)`, mapped. `save_user_fact`/`get_user_facts` → UserFact CRUD. `run_readonly_sql` → `sql.run(userId, input.sql)`. `compare_periods` → stub returning `{ note: 'implemented in Phase 5' }` (replaced in 5.3).
+- [ ] **Step 3: Implement `index.ts`** — `buildTools({ prisma, userId })` returns ai-sdk `tool()` definitions with zod input schemas. Each data tool calls `prisma.withUser(userId, tx => …)`. `query_spending` → `tx.transaction.aggregate({ _sum: { amount }, _count: true, where })`, return `{ total: Math.abs(Number(sum)||0), txnCount, currency: 'USD' }`. `list_transactions` → `findMany` with `take: Math.min(input.limit ?? 20, 50)`, mapped. `save_user_fact`/`get_user_facts` → UserFact CRUD. `compare_periods` → stub returning `{ note: 'implemented in Phase 5' }` (replaced in 5.3). (The `run_readonly_sql` tool is added later in STRETCH S1, which extends `buildTools` to optionally accept a `sql` executor.)
 
 - [ ] **Step 4: Run, verify PASS.**
 
@@ -870,7 +876,7 @@ git add -A && git commit -m "feat: worker-maintained monthly rollups + compare_p
 
 ---
 
-## Phase 6 — Receipt OCR (first to cut under time pressure)
+## Phase 6 (STRETCH S2) — Receipt OCR
 
 ### Task 6.1: Vision extraction + receipt processor
 
@@ -949,7 +955,7 @@ git add -A && git commit -m "docs: README with setup, architecture, scale story,
 - Spec §2 layout → Tasks 0.1, 0.2, 1.1, 3.1, 5.1.
 - Spec §3 docker → Task 0.3.
 - Spec §4 data model → Task 1.1. §5 RLS → Tasks 1.2, 2.1 (withUser), 4.2 (RO exec).
-- Spec §6 AIHelper → Task 3.1. §7 agent loop+tools → Tasks 3.2, 4.3. §8 safe SQL → Tasks 4.1, 4.2.
+- Spec §6 AIHelper → Task 3.1. §7 agent loop+tools → Tasks 3.2, 4.3. §8 safe SQL (STRETCH S1) → Tasks 4.1, 4.2.
 - Spec §9 scale (rollups) → Tasks 5.2, 5.3. §10 features → Phases 2–6. §11 edge cases → 5.2 (CSV), 6.1 (receipt), system-prompt (ambiguous/unanswerable) in 4.3.
 - Spec §12 tests → tests embedded in 0.2, 1.3, 3.1, 4.1, 4.3, 5.2, 5.3, 6.1, 7.2, 7.3.
 - Spec §14 roadmap → phase order matches.
