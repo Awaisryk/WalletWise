@@ -7,7 +7,16 @@ import {
   type ToolSet,
   type UIMessage,
 } from 'ai';
+import { Logger } from '@nestjs/common';
 import { AIHelper, AITask, type AICfg } from '@walletwise/ai';
+import {
+  extractProviderErrorInfo,
+  formatProviderErrorForLog,
+  isProviderGenerationError,
+  truncateFailedGeneration,
+} from './provider-error';
+
+const logger = new Logger('ChatOrchestrator');
 
 export interface RunChatParams {
   /** AI environment — selects dev (local) vs prod (Groq) model routing. */
@@ -25,25 +34,43 @@ export interface RunChatParams {
   system: string;
 }
 
+export interface RunChatOptions {
+  /**
+   * Invoked when the underlying `streamText` finishes. The controller uses this
+   * to read the turn's usage and roll the cumulative cost into Redis. Mirrors
+   * resume-plus's orchestrator `opts.onFinish` — the event is forwarded as-is.
+   */
+  onFinish?: (event?: any) => void | Promise<void>;
+}
+
 /**
  * Runs one WalletWise chat turn through ai-sdk v6 `streamText`.
  *
- * Model, temperature, and provider options are resolved from {@link AIHelper}
- * for the CHAT task so provider strings never leak into the controller. No
- * tools are wired yet — the finance tool catalog lands in Phase 4; the
- * `stopWhen: stepCountIs(6)` cap is already in place so adding tools later is a
- * one-line change.
+ * This mirrors resume-plus's `ChatOrchestrator.chatResumeV2` `streamText` scaffold
+ * (apps/server/src/ai/conversation/orchestrator.ts) MINUS the resume/coach
+ * domain pre-processing: no tools, snapshot, goal, plan, Stripe plan resolution,
+ * history compaction, or active-tool selection. What's kept verbatim:
  *
- * Returns the raw `streamText` result so the controller can pipe it straight
- * to the HTTP response.
+ *   - the UI-vs-model message detection + `convertToModelMessages`
+ *   - `stopWhen: stepCountIs(8)` so wiring tools later is a one-line change
+ *   - `includeRawChunks` + the dedup'd provider-error logger fed by `onChunk`
+ *     (raw chunks) and `onError`
+ *   - `maxRetries: 0` and the provider options / temperature pulled from AIHelper
+ *
+ * Model, temperature, and provider options are resolved from {@link AIHelper}
+ * for the CHAT task so provider strings never leak into the controller. Returns
+ * the raw `streamText` result so the controller can pipe it straight to the HTTP
+ * response.
  */
 export async function runChat(
   params: RunChatParams,
+  opts?: RunChatOptions,
 ): Promise<StreamTextResult<ToolSet, never>> {
   const { env, cfg, messages, system } = params;
 
   // UI messages carry a `parts` array; convert them to model messages. Plain
-  // model-message arrays (no `parts`) are passed through untouched.
+  // model-message arrays (no `parts`) are passed through untouched. Mirrors the
+  // resume-plus detection (`incoming[0]?.parts`).
   const incoming = Array.isArray(messages) ? messages : [];
   const modelMessages: ModelMessage[] =
     incoming.length > 0 && (incoming[0] as { parts?: unknown }).parts
@@ -51,13 +78,52 @@ export async function runChat(
       : (incoming as ModelMessage[]);
 
   const providerOptions = AIHelper.getProviderOptions(AITask.CHAT, env);
+  const chatModelConfig = AIHelper.getModelConfig(AITask.CHAT, env);
+
+  // Provider-error logging helper, copied from resume-plus's orchestrator. Groq's
+  // gpt-oss models occasionally surface `tool_use_failed` / `json_validate_failed`
+  // generation errors inside raw chunks or the stream error; we log them once
+  // (deduped) for debugging without exposing them to the user.
+  const loggedProviderErrors = new Set<string>();
+  const logProviderError = (source: string, payload: unknown) => {
+    const info = extractProviderErrorInfo(payload);
+    if (!isProviderGenerationError(info)) return;
+    const dedupeKey = [source, info?.requestId, info?.code, info?.message].join('|');
+    if (loggedProviderErrors.has(dedupeKey)) return;
+    loggedProviderErrors.add(dedupeKey);
+
+    const failedGeneration = info?.failedGeneration
+      ? process.env.AI_LOG_FAILED_GENERATION === 'true' || process.env.NODE_ENV !== 'production'
+        ? info.failedGeneration
+        : truncateFailedGeneration(info.failedGeneration)
+      : null;
+    logger.warn(
+      `[AIProviderError] source=${source} provider=${chatModelConfig.provider} model=${chatModelConfig.model} task=${AITask.CHAT} ${formatProviderErrorForLog(
+        info!,
+      )}${failedGeneration ? ` failed_generation=${failedGeneration}` : ''}`,
+    );
+  };
 
   return streamText({
     model: AIHelper.getModel(AITask.CHAT, env, cfg),
     system,
     messages: modelMessages,
-    stopWhen: stepCountIs(6),
+    // No tools yet — the finance tool catalog lands in Phase 4. The step cap is
+    // already in place so adding tools later is a one-line change.
+    stopWhen: stepCountIs(8),
     temperature: AIHelper.getTemperature(AITask.CHAT, env),
+    maxRetries: 0,
     ...(providerOptions ? { providerOptions } : {}),
+    includeRawChunks: true,
+    onChunk: ({ chunk }) => {
+      if ((chunk as any)?.type !== 'raw') return;
+      logProviderError('chat_chunk', (chunk as any).rawValue ?? (chunk as any).raw ?? chunk);
+    },
+    onError: ({ error }) => {
+      logProviderError('chat_stream', error);
+    },
+    onFinish: async (event) => {
+      await opts?.onFinish?.(event);
+    },
   });
 }
