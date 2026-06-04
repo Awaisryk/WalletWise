@@ -3,6 +3,22 @@ import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
 import type { LanguageModel } from 'ai';
 
 /**
+ * Return the first argument that is (or parses to) a finite number. Lifted from
+ * resume-plus's ai.helper so {@link AIHelper.normalizeUsage} can coalesce token
+ * counts that arrive under different keys / shapes across providers.
+ */
+function firstFiniteNumber(...values: unknown[]): number | undefined {
+  for (const value of values) {
+    if (typeof value === 'number' && Number.isFinite(value)) return value;
+    if (typeof value === 'string' && value.trim()) {
+      const parsed = Number(value);
+      if (Number.isFinite(parsed)) return parsed;
+    }
+  }
+  return undefined;
+}
+
+/**
  * Task-based model routing for WalletWise.
  *
  * Controllers and tools NEVER hardcode provider strings or model ids — they
@@ -85,5 +101,177 @@ export class AIHelper {
       return { groq: { reasoningEffort: 'low' as const } };
     }
     return undefined;
+  }
+
+  /**
+   * USD cost of one model call. Lifted from resume-plus's
+   * {@link AIHelper.calculateCost} (apps/server/src/ai/ai.helper.ts) with the
+   * per-provider price table trimmed to the two providers WalletWise uses:
+   *
+   *   groq gpt-oss-120b   -> $0.15 / M input, $0.75 / M output, cached = 50% input
+   *                          (resume-plus's documented Groq gpt-oss-120b pricing)
+   *   groq llama-4-scout  -> $0.10 / M input, $0.10 / M output, cached = 50% input
+   *                          (resume-plus's scout pricing — the GROQ else-branch)
+   *   local               -> $0 (dev runs against a local OpenAI-compatible server)
+   *
+   * Token counts are coalesced through {@link normalizeUsage} so the ai-sdk v6
+   * usage shape (`inputTokens` / `outputTokens` / `cachedInputTokens` /
+   * `totalTokens`) and raw provider payloads both work.
+   */
+  static calculateCost(
+    usage: {
+      inputTokens?: number;
+      outputTokens?: number;
+      reasoningTokens?: number;
+      cachedInputTokens?: number;
+      inputTokenDetails?: {
+        cacheReadTokens?: number;
+        noCacheTokens?: number;
+      };
+      outputTokenDetails?: {
+        reasoningTokens?: number;
+      };
+      raw?: Record<string, any>;
+    },
+    task: AITask,
+    env: 'dev' | 'prod',
+  ): number {
+    const config = this.getModelConfig(task, env);
+    const normalizedUsage = this.normalizeUsage(usage);
+    let inputCostPerM = 0;
+    let cachedInputCostPerM = 0;
+    let outputCostPerM = 0;
+
+    // Set pricing based on provider and model.
+    switch (config.provider) {
+      case 'groq':
+        if (config.model.includes('llama-4-maverick')) {
+          inputCostPerM = 0.2;
+          outputCostPerM = 0.6;
+          // cached input is 50% of the input price
+          cachedInputCostPerM = inputCostPerM * 0.5;
+        } else if (config.model.includes('gpt-oss')) {
+          // Groq gpt-oss-120b public pricing (as of 2026-05):
+          //   $0.15 / M input, $0.75 / M output, cached input = 50% of input.
+          inputCostPerM = 0.15;
+          outputCostPerM = 0.75;
+          cachedInputCostPerM = inputCostPerM * 0.5; // 0.075
+        } else {
+          // llama-4-scout / other Groq text models.
+          inputCostPerM = 0.1;
+          outputCostPerM = 0.1;
+          cachedInputCostPerM = inputCostPerM * 0.5;
+        }
+        break;
+
+      case 'local':
+        // Dev runs against a local OpenAI-compatible server (no real $ cost).
+        inputCostPerM = 0;
+        outputCostPerM = 0;
+        cachedInputCostPerM = 0;
+        break;
+
+      default:
+        // Unknown provider, assume no cost.
+        return 0;
+    }
+
+    const cachedInputTokens = Math.min(
+      normalizedUsage.cachedInputTokens ?? 0,
+      normalizedUsage.inputTokens ?? 0,
+    );
+    const nonCachedInputTokens = Math.max(
+      (normalizedUsage.inputTokens ?? 0) - cachedInputTokens,
+      0,
+    );
+
+    const cost =
+      (nonCachedInputTokens * inputCostPerM) / 1_000_000 +
+      (cachedInputTokens * cachedInputCostPerM) / 1_000_000 +
+      ((normalizedUsage.outputTokens ?? 0) * outputCostPerM) / 1_000_000 +
+      ((normalizedUsage.reasoningTokens ?? 0) * outputCostPerM) / 1_000_000;
+
+    return cost;
+  }
+
+  /**
+   * Normalize a usage object into a flat `{ inputTokens, outputTokens,
+   * reasoningTokens, cachedInputTokens, totalTokens, nonCachedInputTokens }`
+   * shape. Lifted from resume-plus's {@link AIHelper.normalizeUsage} — tolerates
+   * the ai-sdk v6 usage shape plus assorted raw provider payload keys.
+   */
+  static normalizeUsage(usage?: {
+    inputTokens?: number;
+    outputTokens?: number;
+    reasoningTokens?: number;
+    cachedInputTokens?: number;
+    totalTokens?: number;
+    inputTokenDetails?: {
+      noCacheTokens?: number;
+      cacheReadTokens?: number;
+      cacheWriteTokens?: number;
+      [key: string]: unknown;
+    };
+    outputTokenDetails?: {
+      textTokens?: number;
+      reasoningTokens?: number;
+      [key: string]: unknown;
+    };
+    raw?: Record<string, any>;
+    [key: string]: unknown;
+  }) {
+    const raw = usage?.raw ?? {};
+    const promptDetails = raw.prompt_tokens_details ?? raw.promptTokenDetails ?? {};
+    const completionDetails = raw.completion_tokens_details ?? raw.completionTokenDetails ?? {};
+
+    const inputTokens = firstFiniteNumber(usage?.inputTokens, raw.prompt_tokens, raw.input_tokens);
+    const outputTokens = firstFiniteNumber(
+      usage?.outputTokens,
+      raw.completion_tokens,
+      raw.output_tokens,
+    );
+    const noCacheTokens = firstFiniteNumber(
+      usage?.inputTokenDetails?.noCacheTokens,
+      (usage?.inputTokenDetails as any)?.noCache,
+      promptDetails.no_cache_tokens,
+      promptDetails.noCacheTokens,
+    );
+    const cachedInputTokens =
+      firstFiniteNumber(
+        usage?.cachedInputTokens,
+        usage?.inputTokenDetails?.cacheReadTokens,
+        (usage?.inputTokenDetails as any)?.cacheRead,
+        promptDetails.cached_tokens,
+        promptDetails.cache_read_tokens,
+        promptDetails.cacheReadTokens,
+      ) ??
+      (inputTokens !== undefined && noCacheTokens !== undefined
+        ? Math.max(inputTokens - noCacheTokens, 0)
+        : undefined);
+    const reasoningTokens = firstFiniteNumber(
+      usage?.reasoningTokens,
+      usage?.outputTokenDetails?.reasoningTokens,
+      (usage?.outputTokenDetails as any)?.reasoning,
+      completionDetails.reasoning_tokens,
+      completionDetails.reasoningTokens,
+    );
+    const totalTokens = firstFiniteNumber(
+      usage?.totalTokens,
+      raw.total_tokens,
+      raw.totalTokens,
+      inputTokens !== undefined || outputTokens !== undefined
+        ? (inputTokens ?? 0) + (outputTokens ?? 0)
+        : undefined,
+    );
+
+    return {
+      inputTokens,
+      outputTokens,
+      reasoningTokens,
+      cachedInputTokens,
+      totalTokens,
+      nonCachedInputTokens:
+        inputTokens !== undefined ? Math.max(inputTokens - (cachedInputTokens ?? 0), 0) : undefined,
+    };
   }
 }
