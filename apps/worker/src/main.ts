@@ -11,9 +11,6 @@ import { WorkerModule } from './worker.module';
  * `WORKER_CONCURRENCY`. Graceful shutdown is wired via `enableShutdownHooks()`
  * plus the dispatcher's own `onModuleDestroy` hook, which lets BullMQ drain
  * in-flight jobs and close its ioredis connection before exit.
- *
- * Lifted from bugsport's apps/worker/src/main.ts (minus nestjs-pino — we use
- * the default Nest logger, same as apps/api).
  */
 async function bootstrap(): Promise<void> {
   const app = await NestFactory.createApplicationContext(WorkerModule, {

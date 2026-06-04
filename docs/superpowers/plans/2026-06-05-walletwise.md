@@ -76,7 +76,7 @@ packages:
 
 Set `.nvmrc` to `22`. Set `.npmrc` to `auto-install-peers=true`.
 
-`turbo.json`: copy the existing pattern from `/home/vesper/code/bugsport/turbo.json`, with `DATABASE_URL`, `REDIS_URL`, `GROQ_API_KEY`, `LOCAL_AI_BASE_URL`, and `SUPERTOKENS_CORE_URL` in `passThroughEnv`.
+`turbo.json`: standard Turbo 2.x config with `build`/`test`/`lint`/`typecheck` cached and `dev` persistent+uncached; put `DATABASE_URL`, `REDIS_URL`, `GROQ_API_KEY`, `LOCAL_AI_BASE_URL`, and `SUPERTOKENS_CORE_URL` in `passThroughEnv`.
 
 Verify:
 
@@ -279,7 +279,7 @@ Create:
 - `apps/api/src/prisma/prisma.module.ts`
 - `apps/api/jest.config.ts`
 
-Use NestJS + Fastify. Copy the normal bootstrap pattern from `/home/vesper/code/bugsport`, including Fastify cookies and CORS.
+Use NestJS + Fastify with the standard bootstrap pattern, including Fastify cookies and CORS.
 
 Use normal Prisma access, and make services add `userId` to their own queries.
 

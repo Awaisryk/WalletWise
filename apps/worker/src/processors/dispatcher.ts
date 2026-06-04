@@ -24,9 +24,6 @@ import { RollupProcessor } from './rollup.processor';
  * The retry/backoff/retention policy lives on the *producer* side (the API's
  * JobBus and the worker's JobProducer); the consumer just throws on failure
  * and BullMQ handles the rest.
- *
- * Lifted from bugsport's IntegrationEventsProcessor (apps/worker/src/
- * integrations/integration-events.processor.ts).
  */
 @Injectable()
 export class Dispatcher implements OnModuleInit, OnModuleDestroy {

@@ -9,7 +9,7 @@ import { ProcessorsModule } from './processors/processors.module';
  *   2. PrismaModule       — global, app-singleton Prisma client.
  *   3. ProcessorsModule   — BullMQ Worker (Dispatcher) + job processors.
  *
- * Mirrors apps/api/src/app.module.ts and bugsport's worker.module.ts.
+ * Mirrors the structure of apps/api/src/app.module.ts.
  */
 @Module({
   imports: [WorkerConfigModule, PrismaModule, ProcessorsModule],
