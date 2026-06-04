@@ -17,7 +17,6 @@
         "PORT",
         "CLIENT_ORIGIN",
         "DATABASE_URL",
-        "DATABASE_URL_RO",
         "REDIS_URL",
         "GROQ_API_KEY",
         "LOCAL_AI_BASE_URL",

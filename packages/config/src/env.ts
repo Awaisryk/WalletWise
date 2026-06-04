@@ -5,7 +5,6 @@ const base = z.object({
   PORT: z.coerce.number().default(4000),
   CLIENT_ORIGIN: z.string().url(),
   DATABASE_URL: z.string().min(1),
-  DATABASE_URL_RO: z.string().min(1),
   REDIS_URL: z.string().min(1),
   SUPERTOKENS_CORE_URL: z.string().url(),
   SUPERTOKENS_API_KEY: z.string().optional(),

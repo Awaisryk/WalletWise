@@ -26,7 +26,6 @@ services:
       - '${POSTGRES_HOST_PORT:-5432}:5432'
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./initdb:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-walletwise} -d ${POSTGRES_DB:-walletwise}']
       interval: 5s
@@ -121,7 +120,6 @@ services:
       - .env.dev
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-walletwise}:${POSTGRES_PASSWORD:-walletwise}@postgres:5432/${POSTGRES_DB:-walletwise}?schema=public
-      DATABASE_URL_RO: postgresql://walletwise_ro:walletwise_ro@postgres:5432/${POSTGRES_DB:-walletwise}?schema=public
       REDIS_URL: redis://redis:6379
       SUPERTOKENS_CORE_URL: http://supertokens:3567
       API_DOMAIN: http://localhost:${API_HOST_PORT:-4000}
@@ -151,7 +149,6 @@ services:
       - .env.dev
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-walletwise}:${POSTGRES_PASSWORD:-walletwise}@postgres:5432/${POSTGRES_DB:-walletwise}?schema=public
-      DATABASE_URL_RO: postgresql://walletwise_ro:walletwise_ro@postgres:5432/${POSTGRES_DB:-walletwise}?schema=public
       REDIS_URL: redis://redis:6379
       SUPERTOKENS_CORE_URL: http://supertokens:3567
 

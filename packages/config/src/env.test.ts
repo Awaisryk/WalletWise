@@ -4,7 +4,6 @@ describe('loadApiEnv', () => {
   const base = {
     NODE_ENV: 'test', PORT: '4000', CLIENT_ORIGIN: 'http://localhost:5173',
     DATABASE_URL: 'postgresql://u:p@localhost:5432/w',
-    DATABASE_URL_RO: 'postgresql://ro:p@localhost:5432/w',
     REDIS_URL: 'redis://localhost:6379',
     SUPERTOKENS_CORE_URL: 'http://localhost:3567',
     AI_ENV: 'dev', LOCAL_AI_BASE_URL: 'http://localhost:1234/v1',
