@@ -12,9 +12,30 @@ import { periodDelta } from '@walletwise/contracts';
 import { buildTools } from './index';
 
 function makePrisma() {
-  const aggregate = jest.fn(async () => ({ _sum: { amount: -42.5 }, _count: 3 }));
+  const aggregate = jest.fn(async (args?: any) => {
+    if (args?._min || args?._max) {
+      return {
+        _count: 45,
+        _min: { postedAt: new Date('2026-01-05T00:00:00Z') },
+        _max: { postedAt: new Date('2026-05-25T00:00:00Z') },
+      };
+    }
+    return { _sum: { amount: -42.5 }, _count: 3 };
+  });
+  const count = jest.fn(async (args?: any) => {
+    if (args?.where?.amount?.lt === 0) return 40;
+    if (args?.where?.amount?.gt === 0) return 5;
+    return 45;
+  });
   const findMany = jest.fn(async () => [
     { id: 't1', postedAt: new Date('2026-03-15T00:00:00Z'), merchantRaw: 'X', amount: -10, category: 'groceries' },
+  ]);
+  // groupBy(category) for get_spending_breakdown — deliberately out of total order
+  // and with a null category so the tool's sort + 'uncategorized' coalesce are exercised.
+  const groupBy = jest.fn(async () => [
+    { category: 'groceries', _sum: { amount: -300 }, _count: 8 },
+    { category: 'rent', _sum: { amount: -1200 }, _count: 1 },
+    { category: null, _sum: { amount: -100 }, _count: 2 },
   ]);
   const factCreate = jest.fn(async () => ({}));
   const factFindMany = jest.fn(async () => [
@@ -28,15 +49,151 @@ function makePrisma() {
     { day: new Date('2026-05-05T00:00:00Z'), totalAmount: 120 },
     { day: new Date('2026-04-10T00:00:00Z'), totalAmount: 200 },
   ]);
+  const budgetUpsert = jest.fn(async () => ({}));
+  const budgetFindMany = jest.fn(async () => [
+    { category: 'dining', monthlyLimit: 300 },
+  ]);
   const prisma: any = {
-    transaction: { aggregate, findMany },
+    transaction: { aggregate, count, findMany, groupBy },
     userFact: { create: factCreate, findMany: factFindMany },
     dailyRollup: { findMany: rollupFindMany },
+    budget: { upsert: budgetUpsert, findMany: budgetFindMany },
   };
-  return { prisma, aggregate, findMany, factCreate, factFindMany, rollupFindMany };
+  return {
+    prisma,
+    aggregate,
+    count,
+    findMany,
+    groupBy,
+    factCreate,
+    factFindMany,
+    rollupFindMany,
+    budgetUpsert,
+    budgetFindMany,
+  };
 }
 
 describe('buildTools', () => {
+  it('get_data_status reports imported transaction coverage for the current user', async () => {
+    const { prisma, count, aggregate } = makePrisma();
+    const tools = buildTools({ prisma, userId: 'u1' });
+    const r: any = await tools.get_data_status.execute({}, {} as any);
+
+    expect(count).toHaveBeenCalledWith({ where: { userId: 'u1' } });
+    expect(count).toHaveBeenCalledWith({ where: { userId: 'u1', amount: { lt: 0 } } });
+    expect(count).toHaveBeenCalledWith({ where: { userId: 'u1', amount: { gt: 0 } } });
+    expect(aggregate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { userId: 'u1' },
+        _min: { postedAt: true },
+        _max: { postedAt: true },
+      }),
+    );
+    expect(r).toEqual({
+      hasData: true,
+      transactionCount: 45,
+      spendingTransactionCount: 40,
+      incomeTransactionCount: 5,
+      firstTransactionDate: '2026-01-05',
+      lastTransactionDate: '2026-05-25',
+      categories: ['groceries'],
+    });
+  });
+
+  it('get_spending_breakdown groups by category (userId + amount<0), sorts by total desc, adds shares', async () => {
+    const { prisma, groupBy } = makePrisma();
+    const tools = buildTools({ prisma, userId: 'u1' });
+    const r: any = await tools.get_spending_breakdown.execute({ from: '2026-03-01', to: '2026-04-01' }, {} as any);
+
+    expect(groupBy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        by: ['category'],
+        where: expect.objectContaining({ userId: 'u1', amount: { lt: 0 } }),
+      }),
+    );
+    // total = 300 + 1200 + 100 = 1600; sorted largest first; null -> uncategorized.
+    expect(r.totalSpend).toBe(1600);
+    expect(r.categoryCount).toBe(3);
+    expect(r.categories.map((c: any) => c.category)).toEqual(['rent', 'groceries', 'uncategorized']);
+    expect(r.categories[0]).toMatchObject({ category: 'rent', total: 1200, txnCount: 1, pctOfTotal: 75 });
+    expect(r.categories[2]).toMatchObject({ category: 'uncategorized', total: 100 });
+  });
+
+  it('find_subscriptions scans userId-scoped spending and returns detected recurring charges', async () => {
+    const { prisma, findMany } = makePrisma();
+    // Three monthly Netflix charges (stable amount, monthly cadence) + noise.
+    findMany.mockResolvedValueOnce([
+      { merchantRaw: 'Netflix', amount: -15.99, postedAt: new Date('2026-01-05T00:00:00Z') },
+      { merchantRaw: 'Netflix', amount: -15.99, postedAt: new Date('2026-02-04T00:00:00Z') },
+      { merchantRaw: 'Netflix', amount: -15.99, postedAt: new Date('2026-03-06T00:00:00Z') },
+      { merchantRaw: 'Best Buy', amount: -420, postedAt: new Date('2026-02-10T00:00:00Z') },
+    ]);
+    const tools = buildTools({ prisma, userId: 'u1', today: new Date('2026-05-15T00:00:00Z') });
+    const r: any = await tools.find_subscriptions.execute({}, {} as any);
+    expect(findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: expect.objectContaining({ userId: 'u1', amount: { lt: 0 } }) }),
+    );
+    expect(r.count).toBe(1);
+    expect(r.subscriptions[0]).toMatchObject({ merchant: 'Netflix', cadence: 'monthly', typicalAmount: 15.99 });
+    expect(r.estimatedMonthlyTotal).toBe(15.99);
+  });
+
+  it('find_unusual_charges scans userId-scoped spending and returns outliers vs category median', async () => {
+    const { prisma, findMany } = makePrisma();
+    findMany.mockResolvedValueOnce([
+      { id: 'c1', merchantRaw: 'Cafe A', amount: -4, category: 'dining', postedAt: new Date('2026-03-01T00:00:00Z') },
+      { id: 'c2', merchantRaw: 'Cafe B', amount: -5, category: 'dining', postedAt: new Date('2026-03-02T00:00:00Z') },
+      { id: 'c3', merchantRaw: 'Cafe C', amount: -6, category: 'dining', postedAt: new Date('2026-03-03T00:00:00Z') },
+      { id: 'c4', merchantRaw: 'Steakhouse', amount: -120, category: 'dining', postedAt: new Date('2026-03-10T00:00:00Z') },
+    ]);
+    const tools = buildTools({ prisma, userId: 'u1', today: new Date('2026-03-20T00:00:00Z') });
+    const r: any = await tools.find_unusual_charges.execute({}, {} as any);
+    expect(findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: expect.objectContaining({ userId: 'u1', amount: { lt: 0 } }) }),
+    );
+    expect(r.count).toBe(1);
+    expect(r.unusualCharges[0]).toMatchObject({ id: 'c4', merchant: 'Steakhouse', amount: 120, category: 'dining' });
+  });
+
+  it('set_budget upserts a normalized (lowercased) category scoped to userId', async () => {
+    const { prisma, budgetUpsert } = makePrisma();
+    const tools = buildTools({ prisma, userId: 'u1' });
+    const r: any = await tools.set_budget.execute({ category: 'Dining', monthlyLimit: 300 }, {} as any);
+    expect(budgetUpsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { userId_category: { userId: 'u1', category: 'dining' } },
+        create: { userId: 'u1', category: 'dining', monthlyLimit: 300 },
+      }),
+    );
+    expect(r).toMatchObject({ ok: true, category: 'dining', monthlyLimit: 300 });
+  });
+
+  it('get_budget_status compares this month spend to the limit, scoped to userId, with a status', async () => {
+    const { prisma, aggregate } = makePrisma();
+    const tools = buildTools({ prisma, userId: 'u1', today: new Date('2026-05-15T00:00:00Z') });
+    const r: any = await tools.get_budget_status.execute({}, {} as any);
+    // spend aggregate is scoped to userId + amount<0 + the category, within May.
+    expect(aggregate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          userId: 'u1',
+          amount: { lt: 0 },
+          category: { equals: 'dining', mode: 'insensitive' },
+        }),
+      }),
+    );
+    expect(r.month).toBe('2026-05');
+    // limit 300, spent 42.5 -> remaining 257.5, ~14.2% used, ok.
+    expect(r.budgets[0]).toMatchObject({
+      category: 'dining',
+      limit: 300,
+      spent: 42.5,
+      remaining: 257.5,
+      pctUsed: 14.2,
+      status: 'ok',
+    });
+  });
+
   it('query_spending scopes to userId and filters amount < 0, returns positive total', async () => {
     const { prisma, aggregate } = makePrisma();
     const tools = buildTools({ prisma, userId: 'u1' });

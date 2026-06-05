@@ -87,6 +87,11 @@ export class AIHelper {
     return createOpenAICompatible({
       name: 'local',
       baseURL: cfg.LOCAL_AI_BASE_URL ?? 'http://localhost:1234/v1',
+      // Match the local server's capabilities: report token usage (so cost
+      // accounting still runs) and advertise structured-output support (needed
+      // for reliable tool calls from gpt-oss on an OpenAI-compatible endpoint).
+      includeUsage: true,
+      supportsStructuredOutputs: true,
     })(c.model);
   }
 

@@ -189,6 +189,7 @@ Tool catalog:
 
 | Tool | Purpose | Data access |
 |---|---|---|
+| `get_data_status` | Check whether transactions are imported, plus counts/date coverage/categories | Aggregate + bounded category list, scoped to current user |
 | `query_spending` | Spend total for category/merchant/date range | Indexed raw aggregate with `amount < 0` |
 | `compare_periods` | Current period vs baseline, at week/month/year granularity | `DailyRollup` only (days bucketed into periods) |
 | `list_transactions` | Biggest purchase / recent rows | Raw transactions, capped at 50, filtered to current user |

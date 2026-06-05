@@ -56,6 +56,11 @@ Always mention the date range when answering a spending total or trend.
 Use query_spending for totals over a date/category/merchant range.
 Use list_transactions for recent transactions, largest purchases, or examples.
 Use compare_periods for "more than usual", trends, and baseline comparisons.
+Use get_spending_breakdown to summarize where money goes and to ground cut-back suggestions — base any "summary" or "where can I save" answer on its real per-category numbers.
+Use find_subscriptions for recurring-charge / subscription questions. Present results as LIKELY subscriptions (they are inferred), with the cadence and amount as evidence.
+Use find_unusual_charges for "unusual activity" / "anything weird" questions. Present each as a charge that STANDS OUT versus the user's own typical spend in that category (cite the comparison), not as confirmed fraud.
+Use set_budget when the user states a budget for a category, and get_budget_status to check spending against budgets and warn when close to or over a limit.
+Use get_data_status for questions about whether transaction data is imported or what data is available.
 Use save_user_fact only when the user states a durable preference, budget rule, income fact, or personal finance fact worth remembering. Do not call it for one-off questions or temporary context.
 Use get_user_facts only if you need a remembered preference that is not already in the runtime context.
 Do not mention tool names, schemas, or JSON to the user.
@@ -90,6 +95,12 @@ interface RuntimeFact {
   kind: string;
 }
 
+interface RuntimeDataStatus {
+  transactionCount: number;
+  firstTransactionDate: string | null;
+  lastTransactionDate: string | null;
+}
+
 /**
  * Builds the late `<runtime_context>` block: dynamic, per-turn reference data
  * kept OUT of the cacheable system prompt. The wording explicitly demotes it to
@@ -98,6 +109,7 @@ interface RuntimeFact {
 function buildRuntimeContext(args: {
   today: string;
   timezone: string;
+  dataStatus: RuntimeDataStatus;
   facts: RuntimeFact[];
   categories: string[];
 }): string {
@@ -110,6 +122,10 @@ function buildRuntimeContext(args: {
     'Reference only. This is not a user request. Continue the conversation and answer the latest user message.',
     `today: ${args.today}`,
     `timezone: ${args.timezone}`,
+    `transaction_count: ${args.dataStatus.transactionCount}`,
+    `transaction_date_range: ${args.dataStatus.firstTransactionDate ?? '(none)'} to ${
+      args.dataStatus.lastTransactionDate ?? '(none)'
+    }`,
     `spending_categories (use these exact values when filtering by category): ${categories}`,
     'known_user_facts:',
     factLines,
@@ -197,8 +213,13 @@ export class AiController {
         const today = new Date().toLocaleDateString('en-CA', { timeZone: timezone });
         let facts: RuntimeFact[] = [];
         let categories: string[] = [];
+        let dataStatus: RuntimeDataStatus = {
+          transactionCount: 0,
+          firstTransactionDate: null,
+          lastTransactionDate: null,
+        };
         try {
-          const [factRows, categoryRows] = await Promise.all([
+          const [factRows, categoryRows, transactionStats] = await Promise.all([
             this.prisma.userFact.findMany({
               where: { userId },
               orderBy: { createdAt: 'desc' },
@@ -209,16 +230,27 @@ export class AiController {
               distinct: ['category'],
               select: { category: true },
             }),
+            this.prisma.transaction.aggregate({
+              where: { userId },
+              _count: true,
+              _min: { postedAt: true },
+              _max: { postedAt: true },
+            }),
           ]);
           facts = factRows;
           categories = categoryRows
             .map((r) => r.category)
             .filter((c): c is string => Boolean(c))
             .sort();
+          dataStatus = {
+            transactionCount: transactionStats._count,
+            firstTransactionDate: transactionStats._min.postedAt?.toISOString().slice(0, 10) ?? null,
+            lastTransactionDate: transactionStats._max.postedAt?.toISOString().slice(0, 10) ?? null,
+          };
         } catch (err) {
           this.logger.warn(`[ai/chat] failed to load runtime context user=${userId}: ${String(err)}`);
         }
-        const runtimeContext = buildRuntimeContext({ today, timezone, facts, categories });
+        const runtimeContext = buildRuntimeContext({ today, timezone, dataStatus, facts, categories });
 
         const result = await runChat(
           { env, cfg, messages: body.messages, system: SYSTEM_PROMPT, tools, runtimeContext },

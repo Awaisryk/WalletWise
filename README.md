@@ -161,9 +161,10 @@ Isolation is **application-level and enforced on every query**:
 **Built (works end-to-end):**
 - SuperTokens email/password auth; on sign-up the API upserts a `User { authId, email }`.
 - CSV import: async via the worker, with dedupe (per-user `dedupeHash`), a skipped-row report (duplicate / missing-field / malformed), and `createMany({ skipDuplicates: true })`.
+- Data-status check: `get_data_status` answers whether the user has imported transactions, with counts, date coverage, and available categories.
 - Spending Q&A: `query_spending` (totals) and `list_transactions` (recent rows / biggest purchase).
 - Trend comparison: `compare_periods` over `DailyRollup`, bucketed to week/month/year.
-- User memory: `save_user_fact` / `get_user_facts`; remembered facts are also prepended to the system prompt so they apply from the first token.
+- User memory: `save_user_fact` / `get_user_facts`; remembered facts and data coverage are injected as late runtime reference context so the stable system prompt remains cache-friendly.
 - Per-turn + cumulative cost calculation, streamed to the client.
 
 **Stretch — routed but not built:**
@@ -187,7 +188,7 @@ Isolation is **application-level and enforced on every query**:
 
 - **Single agent, single tool loop.** One `streamText` loop bounded at 8 steps gathers data through tools then answers. Simple and debuggable; no multi-agent orchestration or planning layer (out of scope, and not needed for these questions).
 - **Daily rollup grain, partial current period.** `compare_periods` buckets daily rollups into week/month/year, so the most recent *bucket* (e.g. the current month) may be partial when compared against complete prior periods — fine for "more than usual so far?", but a same-day-of-period comparison (e.g. "month-to-date vs the same point last month") would need extra logic. A deliberate cut for the build window.
-- **Rollups rebuilt, not incrementally updated.** Each import does a full per-user `DELETE + INSERT`. Correct and idempotent, but at very large per-user volumes an incremental upsert (touching only affected months) would be cheaper.
+- **Rollups rebuilt, not incrementally updated.** Each import does a full per-user `DELETE + INSERT`. Correct and idempotent, but at very large per-user volumes an incremental upsert (touching only affected days) would be cheaper.
 - **CSV rides in the job payload.** Fine for the assessment's file sizes; very large files would warrant streaming from object storage instead of carrying the text through Redis.
 - **Receipts (if built) would be process-and-discard.** The image yields a transaction; no object storage is in scope, so the image itself wouldn't be retained.
 - **~6-hour build window.** Scope was chosen to make the product loop and the scale story real and tested, rather than to surface every feature half-built.
@@ -202,11 +203,11 @@ pnpm -w typecheck   # tsc across every package (0 errors)
 pnpm -w build       # tsc builds + a Vite production build of the web app
 ```
 
-**35 unit tests** across the workspace, focused on the logic that has to be correct:
+**45 unit tests** across the workspace, focused on the logic that has to be correct:
 
 - **CSV parse + dedupe** (`packages/contracts`): duplicate/missing/malformed classification, sign preservation, stable hashing (same inputs ⇒ same hash; different amount or user ⇒ different hash).
 - **Rollup math** (`packages/contracts`): baseline average, percent delta, and `null` delta when the baseline is zero.
-- **Tool handlers** (`apps/api`): every query is **scoped to `userId`**; `query_spending` filters `amount < 0` and returns a positive total (income does not offset spending); `list_transactions` caps `limit` at 50 and "biggest purchase" excludes income; `compare_periods` reads `DailyRollup` (not raw rows); user-fact writes carry `userId`.
+- **Tool handlers** (`apps/api`): every query is **scoped to `userId`**; `get_data_status` reports imported data coverage; `query_spending` filters `amount < 0` and returns a positive total (income does not offset spending); `list_transactions` caps `limit` at 50 and "biggest purchase" excludes income; `compare_periods` reads `DailyRollup` (not raw rows); user-fact writes carry `userId`.
 - **Model routing** (`packages/ai`): dev chat → local provider, prod chat → Groq gpt-oss, vision → multimodal.
 - **Cost calculation** (`packages/ai`): pricing per model and provider-tolerant usage normalization.
 - **Web util + env loader** smoke tests.

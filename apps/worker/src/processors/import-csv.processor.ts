@@ -74,9 +74,8 @@ export class ImportCsvProcessor {
         `import ${importJobId} done user=${userId} total=${rowsTotal} imported=${rows.length} skipped=${skipped.length}`,
       );
 
-      // Rebuild this user's monthly rollups now that new rows exist. Enqueued
-      // via the worker's own producer (the worker has no access to the API's
-      // JobBus). The rollup processor is a placeholder until Phase 5b.
+      // Rebuild this user's daily rollups now that new rows exist. Enqueued via
+      // the worker's own producer (the worker has no access to the API's JobBus).
       await this.producer.enqueue(JOBS.ROLLUP_REBUILD, { userId });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);

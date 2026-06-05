@@ -1,0 +1,27 @@
+- generic [ref=e3]:
+  - banner [ref=e4]:
+    - generic [ref=e5]: WalletWise
+    - button "Sign out" [ref=e6] [cursor=pointer]:
+      - img [ref=e7]
+      - text: Sign out
+  - main [ref=e10]:
+    - generic [ref=e11]:
+      - generic [ref=e12]:
+        - generic [ref=e13]:
+          - img [ref=e14]
+          - text: Import transactions
+        - generic [ref=e17]: Upload a bank CSV to populate your transactions.
+      - generic [ref=e19]:
+        - button "Choose File" [ref=e20]
+        - button "Import" [disabled]
+    - generic [ref=e22]:
+      - generic [ref=e24]:
+        - paragraph [ref=e25]: "Ask WalletWise about your spending. For example:"
+        - generic [ref=e26]:
+          - button "How much did I spend on groceries last month?" [ref=e27] [cursor=pointer]
+          - button "What was my biggest purchase in March?" [ref=e28] [cursor=pointer]
+          - button "Am I spending more than usual this month?" [ref=e29] [cursor=pointer]
+      - generic [ref=e30]:
+        - textbox "Ask about your spending…" [ref=e31]
+        - button "Send" [disabled]:
+          - img
