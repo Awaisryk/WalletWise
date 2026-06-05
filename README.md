@@ -271,4 +271,4 @@ Unit tests across the workspace focus on the logic that has to be correct:
 
 These tests are where multi-tenant isolation is guarded (in lieu of Postgres RLS) and where the sign convention is pinned down.
 
-The **live end-to-end chat** is not unit-tested — it needs a real model endpoint (a local OpenAI-compatible server for `dev`, or a `GROQ_API_KEY` for `prod`). Verify it manually via the web app once `pnpm dev` is up.
+The **live end-to-end chat** is not unit-tested — it needs a real model endpoint (a local OpenAI-compatible server for `dev`, `GROQ_API_KEY` for Groq `prod`, or `AI_PROVIDER=openai` + `OPENAI_API_KEY` for OpenAI). Verify it manually via the web app once `pnpm dev` is up.
