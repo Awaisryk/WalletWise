@@ -1,78 +1,71 @@
 # WalletWise — Design Spec
 
 **Status:** Approved (2026-06-05)
-**Context:** Full-Stack AI Engineer take-home. Personal finance assistant: multi-user, log in, connect financial data, talk to it in natural language. Build window ~6 hours. Scoping is explicitly part of the assessment — a narrow slice that genuinely works beats a broad half-built set.
+**Context:** Full-Stack AI Engineer take-home. Personal finance assistant: multi-user, log in, connect financial data, and ask questions in natural language. Build window ~6 hours. Scoping is part of the assessment; a narrow working slice beats a broad half-built product.
 
-This spec is the source of truth. We implement strictly against it and do not diverge ad hoc.
-
----
-
-## 1. Goals & non-goals
-
-### What the assessment actually scores (and how this design answers it)
-- **System & scalability design** → aggregation in Postgres, never the prompt; worker-maintained rollups; bounded tools.
-- **Handling large context** → raw transactions almost never enter the LLM prompt; the DB aggregates, the model reasons over small results.
-- **Routing & model selection** → `AIHelper` task→provider map; cheap text model for chat, multimodal only when an image is present; dev=local gpt-oss, prod=Groq gpt-oss-120b.
-- **Multi-step / agentic reasoning** → single tool-calling agent loop (`streamText` + `stepCountIs`) that gathers what it needs across steps.
-- **Edge-case & failure handling** → dedup, junk-row reports, low-confidence receipts, ambiguous/unanswerable questions handled explicitly.
-- **Pragmatism (build vs buy)** → SuperTokens for auth, Prisma, BullMQ; effort spent on the hard parts (scale, safe SQL fallback, rollups).
-- **Communication** → README/design note explains every decision, trade-off, and stub.
-
-### Non-goals (explicitly out of scope for the build)
-- Real bank integrations (Plaid etc.) — we ingest the provided CSV / mock endpoint.
-- Object storage for receipts (process-and-discard; prod note only).
-- Production deploy (k8s/CD) — described, not built.
-- Multi-agent orchestration, vector/semantic memory, daily/weekly rollup granularity.
+This spec is the source of truth. Implement against it and do not add extra security/database machinery unless the build is already complete.
 
 ---
 
-## 2. Stack & monorepo layout
+## 0. Auth And User Data
 
-pnpm + Turbo, Node 24. Mirrors existing `bugsport` conventions.
+Use normal SuperTokens auth. Keep the ownership model simple:
+
+1. `User.id` is the app's internal user id.
+2. `User.authId` stores the SuperTokens user id.
+3. User-owned rows store `userId`, which points to `User.id`.
+4. API routes derive the current `User.id` from the SuperTokens session.
+5. The client and the LLM never provide `userId`; server code adds it to queries and writes.
+
+The assistant can only access data through fixed, typed tools.
+
+---
+
+## 1. Goals & Non-Goals
+
+### What the assessment scores
+
+- **System & scalability design** -> aggregation in Postgres, worker-maintained rollups, bounded tool outputs.
+- **Handling large context** -> raw transactions are not sent to the LLM; the DB returns compact facts and aggregates.
+- **Routing & model selection** -> cheap text model for chat; multimodal model only for receipt OCR if the stretch task is built.
+- **Multi-step reasoning** -> one tool-calling agent loop that gathers data through tools before answering.
+- **Edge cases** -> messy CSV rows, duplicates, ambiguity, and unanswerable questions are handled explicitly.
+- **Pragmatism** -> SuperTokens for auth; Prisma, BullMQ, and typed tools for the product-specific work.
+- **Communication** -> README explains what was built, what was skipped, and why.
+
+### Non-goals
+
+- Real bank integrations such as Plaid.
+- Production deployment.
+- Object storage for receipt images.
+- Vector memory and multi-agent orchestration.
+- Sub-daily or per-merchant rollups. Rollups are stored at a **daily** grain and bucketed into week/month/year in code.
+
+---
+
+## 2. Stack & Layout
+
+pnpm + Turbo, Node 22.
 
 ```
 apps/
-  api/        NestJS + Fastify + Prisma — auth, /ai/chat stream, tool execution, uploads
-  web/        React + Vite + Zustand + Tailwind + shadcn/ui + ai-sdk v6 (useChat)
-  worker/     NestJS application context (no HTTP) + BullMQ consumer
+  api/        NestJS + Fastify + Prisma — auth, chat stream, tools, uploads
+  web/        React + Vite + Zustand + Tailwind + shadcn/ui + ai-sdk useChat
+  worker/     NestJS application context + BullMQ consumer
 packages/
-  config/     zod-validated env loader (shared by api + worker)
-  contracts/  shared zod schemas + TS types (DTOs, tool I/O, queue payloads)
-  ai/         AIHelper port: AITask/AIProvider enums, model map, provider factories, cost calc
+  config/     zod-validated env loader
+  contracts/  shared zod schemas + TS types
+  ai/         AIHelper: task/provider routing and model config
 infra/
-  db/         Prisma schema + migrations + RLS policy SQL + CSV seed script
-  compose/    docker-compose.yml + Dockerfiles + .env
+  db/         Prisma schema + migrations + CSV seed script
+  compose/    docker-compose.yml + Dockerfiles + .env.example
 ```
 
-**Trimmed from bugsport** (commodity, not worth 6h): MinIO, Loki, Promtail.
-
-### Tooling / versions (pinned to match references)
-- `pnpm@10.x` via `packageManager`; Node `>=24` via `.nvmrc`.
-- Turbo for `dev`/`build`/`test`/`lint`/`typecheck`.
-- TypeScript strict (`tsconfig.base.json`): `strict`, `noUncheckedIndexedAccess`, `experimentalDecorators`, `emitDecoratorMetadata`, `module: NodeNext`.
-- AI SDK v6: `ai@^6`, `@ai-sdk/openai`, `@ai-sdk/groq`, `@ai-sdk/openai-compatible`, `@ai-sdk/react`.
+Services: Postgres, SuperTokens core + auth DB, Redis, API, worker, and migrate container.
 
 ---
 
-## 3. Services & docker
-
-`infra/compose/docker-compose.yml` services:
-
-| Service | Image | Notes |
-|---|---|---|
-| `postgres` | `postgres:16-alpine` | app DB; healthcheck `pg_isready` |
-| `supertokens-db` | `postgres:16-alpine` | separate auth DB |
-| `supertokens` | `registry.supertokens.io/supertokens/supertokens-postgresql:9.x` | core; depends on supertokens-db |
-| `redis` | `redis:7-alpine` | BullMQ + cache |
-| `migrate` | built | one-shot `prisma migrate deploy`; other services wait on it |
-| `api` | built (`apps/api/Dockerfile`) | depends on postgres/redis/supertokens healthy + migrate complete |
-| `worker` | built (`apps/worker/Dockerfile`) | no exposed port |
-
-Connection strings via env only (no secrets in YAML). `DATABASE_URL` (app role), `DATABASE_URL_RO` (read-only role for the SQL fallback), `REDIS_URL`, `SUPERTOKENS_CORE_URL`.
-
----
-
-## 4. Data model (Prisma / Postgres)
+## 3. Data Model
 
 ```prisma
 model User {
@@ -86,7 +79,7 @@ model Account {
   id     String @id @default(uuid())
   userId String
   name   String
-  type   String                        // checking | credit | savings | ...
+  type   String
 }
 
 model Transaction {
@@ -94,13 +87,13 @@ model Transaction {
   userId       String
   accountId    String?
   postedAt     DateTime
-  amount       Decimal                  // negative = spend, positive = income (documented)
+  amount       Decimal                  // negative = spend, positive = income
   currency     String   @default("USD")
   merchantRaw  String
   merchantNorm String?
   category     String?
   source       String                   // csv | receipt | manual
-  dedupeHash   String                   // sha256(userId|postedAt|amount|merchantRaw)
+  dedupeHash   String
   createdAt    DateTime @default(now())
 
   @@unique([userId, dedupeHash])
@@ -108,13 +101,13 @@ model Transaction {
   @@index([userId, category, postedAt])
 }
 
-model MonthlyRollup {
+model DailyRollup {
   userId      String
-  month       DateTime                  // first of month, UTC
+  day         DateTime                  // first instant of day, UTC
   category    String
   txnCount    Int
-  totalAmount Decimal
-  @@id([userId, month, category])
+  totalAmount Decimal                   // positive spend total from amount < 0
+  @@id([userId, day, category])
 }
 
 model UserFact {
@@ -146,208 +139,157 @@ model ImportJob {
 }
 ```
 
-**Sign convention:** spend stored as negative `amount`; documented once and applied everywhere. Aggregations report absolute spend.
+Sign convention: expenses are stored as negative `amount`; income is positive. Spending queries and spending rollups filter `amount < 0` and report positive totals.
 
 ---
 
-## 5. Row-Level Security (tenant isolation)
+## 4. Auth Flow
 
-RLS is the real mechanism behind "make sure it's not going for other users' data," and it protects the SQL fallback at the database layer.
-
-- Enable RLS on `Transaction`, `Account`, `MonthlyRollup`, `UserFact`, `Budget`, `ImportJob`.
-- Policy per table: `USING (user_id = current_setting('app.current_user_id')::uuid)`.
-- Every request/transaction sets `app.current_user_id` via `SET LOCAL` before queries run (a small Prisma middleware / transaction wrapper).
-- The migrate role / table owner bypasses RLS; the **app role and read-only role do not**.
-- Net effect: even a hand-written `SELECT * FROM transactions` through the fallback returns only the current user's rows — enforced by Postgres, not application code.
-
-RLS policies live in a dedicated migration SQL file in `infra/db`.
+- SuperTokens handles sign-up, sign-in, sessions, and cookies.
+- On sign-up, the API upserts `User { authId, email }`.
+- `SessionGuard` verifies the SuperTokens session and resolves the app `User.id`.
+- Protected routes use that server-side `User.id` for all reads/writes.
 
 ---
 
-## 6. AI layer (`packages/ai`, AIHelper port)
+## 5. AI Layer
 
-Port the resume-plus `AIHelper` pattern: a single source of truth for model selection. No model strings hardcoded in controllers/services.
+`packages/ai` owns model selection. Controllers and tools do not hardcode provider strings.
 
 ```ts
-enum AITask { CHAT, PARSE_VISION }     // extend later; keep minimal for the build
-enum AIProvider { LOCAL, GROQ, OPENAI }
+enum AITask { CHAT, PARSE_VISION }
 
-// MODEL_MAPPINGS: Record<AITask, { dev: ModelConfig; prod: ModelConfig }>
-CHAT:        { dev: LOCAL gpt-oss,            prod: GROQ openai/gpt-oss-120b (reasoningEffort: 'low') }
-PARSE_VISION:{ dev: GROQ llama-4-scout,       prod: GROQ llama-4-scout }   // gpt-oss text-only → no local vision path
+CHAT:
+  dev  -> local OpenAI-compatible gpt-oss
+  prod -> Groq openai/gpt-oss-120b, low reasoning effort
+
+PARSE_VISION:
+  dev/prod -> Groq multimodal model, only if receipt OCR stretch is built
 ```
 
-- `LOCAL` via `createOpenAICompatible({ baseURL: LOCAL_AI_BASE_URL })` (gpt-oss).
-- `GROQ` via `createGroq({ apiKey: GROQ_API_KEY })`.
-- `getModel(task)`, `getProviderOptions(task)`, `getTemperature(task)`, `calculateCost(usage, task)`.
-- **gpt-oss is text-only** → receipts must route to a multimodal model (Groq `llama-4-scout` / Gemini flash-lite). This split is the model-selection signal.
-- Provider/model env overrides supported (`AI_PROVIDER`, `CHAT_MODEL`, etc.) as in resume-plus.
-- PostHog tracing wrapper is **optional/stretch** — interface allows it, off by default.
+The model split is part of the cost/latency story: use a cheap text model for normal finance chat, and only call a multimodal model when an image is uploaded.
 
 ---
 
-## 7. Agent loop & tools
+## 6. Agent Loop & Tools
 
-One multi-step agent loop per turn:
+One `streamText` tool-calling loop per turn:
 
 ```ts
 streamText({
   model: AIHelper.getModel(AITask.CHAT),
-  system,                      // includes the user's relevant UserFacts
+  system,
   messages,
   tools,
   stopWhen: stepCountIs(6),
-  providerOptions: AIHelper.getProviderOptions(AITask.CHAT),
 })
 ```
 
-Streamed to the client with `pipeUIMessageStreamToResponse`. Client consumes via `useChat` (`@ai-sdk/react`) with `DefaultChatTransport`. A `data-cost` transient streams per-turn token/cost telemetry.
+Tool catalog:
 
-### Tool catalog (the agent's well-defined surface)
+| Tool | Purpose | Data access |
+|---|---|---|
+| `query_spending` | Spend total for category/merchant/date range | Indexed raw aggregate with `amount < 0` |
+| `compare_periods` | Current period vs baseline, at week/month/year granularity | `DailyRollup` only (days bucketed into periods) |
+| `list_transactions` | Biggest purchase / recent rows | Raw transactions, capped at 50, filtered to current user |
+| `save_user_fact` | Remember user preference/context | `UserFact` write for current user |
+| `get_user_facts` | Retrieve remembered context | `UserFact` read for current user |
 
-| Tool | Input (zod) | Reads | Returns |
-|---|---|---|---|
-| `query_spending` | `{ category?, merchant?, from, to }` | rollups when whole-month aligned, else bounded raw | `{ total, txnCount, currency }` |
-| `compare_periods` | `{ category?, period, baseline }` | **MonthlyRollup only** | `{ current, baseline, deltaPct }` |
-| `list_transactions` | `{ category?, from, to, sort, limit<=50 }` | raw, capped | rows (id, date, merchant, amount, category) |
-| `save_user_fact` | `{ key, value, kind }` | — | `{ ok }` |
-| `get_user_facts` | `{ kind? }` | UserFact | facts[] |
-| `run_readonly_sql` *(stretch)* | `{ sql }` | read-only role under RLS | rows (capped) |
+Tool rules:
 
-**Tool design rules:**
-- Tools return aggregates or capped rows — never an unbounded dump.
-- Every tool is scoped to the current user (RLS + explicit `userId`).
-- The fixed tools cover the common questions cheaply; `run_readonly_sql` *(stretch)* is the fallback for the long tail.
-
----
-
-## 8. The `run_readonly_sql` safe fallback  *(STRETCH — build only if time remains)*
-
-Defense in depth — four independent layers:
-
-1. **RLS** (§5): physically restricts rows to the current user, regardless of query text.
-2. **Dedicated read-only Postgres role:** `GRANT SELECT` only — no INSERT/UPDATE/DELETE/DDL possible at the privilege level. Used via `DATABASE_URL_RO`.
-3. **Validator (pre-execution):** parse and reject unless it is exactly one statement; statement must be `SELECT` (or `WITH ... SELECT`); reject multiple statements (`;`), comments that hide payloads, write keywords, and access to `pg_catalog` / `information_schema` / `pg_*`.
-4. **Resource caps:** `SET LOCAL statement_timeout = 3000ms`; force/append a `LIMIT` (default 200); cap returned payload size.
-
-On rejection, return a structured error the agent can relay ("I can only run read-only lookups; that query was blocked because …"). The validator is **security-critical and gets explicit unit tests** including injection/escape attempts.
+- Tools return aggregates or capped rows, never full history.
+- Tools are constructed with the server-side `userId`.
+- The LLM supplies only non-identity parameters such as dates, category, merchant, and limit.
+- If the fixed tools cannot answer a question, the assistant says what is missing instead of inventing data.
 
 ---
 
-## 9. Scale story — surviving 10×–100×
+## 7. Scale Story — 10x To 100x Data
 
-All three mechanisms are built, not just described:
+The long-history strategy is deliberate:
 
-1. **Aggregation in the query layer.** `query_spending` is `SUM(...) GROUP BY` — cost is flat in ledger size; the model sees a few numbers.
-2. **Worker-maintained `MonthlyRollup`.** CSV import and new transactions enqueue a rollup job; `compare_periods` reads only rollups (dozens of rows) no matter how many years exist. This also makes "unusual activity" (#4) and "compare across time" (#5) nearly free.
-3. **Bounded fallback (stretch).** `run_readonly_sql` cannot scan unboundedly (timeout + LIMIT + RLS). Not in the MVP; mechanisms 1–2 carry the core scale story on their own.
+1. **Never put raw history in the prompt.** The LLM receives compact query results, not years of transactions.
+2. **Use indexed raw queries only for narrow drilldowns.** For example, biggest purchase in March reads a bounded date range for the current user.
+3. **Use daily rollups for trend questions.** CSV import and new transactions enqueue a rollup rebuild that recomputes per-day, per-category totals. `compare_periods` buckets those days into the requested granularity (week/month/year) and compares the current period against a trailing baseline — "Am I spending more than usual this month/this week?" reads a few dozen rollup rows, not the full ledger.
 
-**Described in the design note (not built):** Redis caching of hot aggregates, monthly table partitioning, read replicas, the import queue as the 100× ingestion path, an index review for new query shapes.
-
----
-
-## 10. Feature plan — MVP vs stretch vs stubbed
-
-**MVP — built for real:**
-- Auth + multi-user (SuperTokens + RLS isolation).
-- CSV import via worker: dedup, missing-field coercion/skip, junk rows surfaced in `ImportJob.report`.
-- #1 Answer spending questions (`query_spending`, `list_transactions`).
-- #5 Compare across time (`compare_periods` on rollups).
-- #10 Remember user context (`save_user_fact` / `get_user_facts`, facts injected into system prompt).
-
-**Stretch — build only if time remains (in priority order):**
-1. The `run_readonly_sql` safe fallback (§8) — the fixed tools cover the assessed core questions without it; this extends coverage to the open-ended long tail.
-2. #2 Receipt OCR (upload → worker vision → transaction).
-
-**Stubbed / described (infra makes them close, but not claimed unless they work):** #3 subscriptions, #4 anomaly flag, #6 budgets (schema present, tracking stubbed), #7 merchant web-lookup, #8 summarize, #9 cut-back. The note explains how each slots onto the existing tools. RLS remains in the MVP regardless — it is the multi-user isolation mechanism for every query.
+Production extensions described in the README: Redis caching for hot aggregates, table partitioning by month, read replicas, and more rollup grains if product questions need them.
 
 ---
 
-## 11. Edge-case handling
+## 8. Feature Plan
 
-- **Messy CSV:** dedupe hash (upsert/skip); rows missing required fields are coerced or skipped and **counted in the import report** (never silently dropped); junk rows reported.
-- **Bad receipt** (blurry/rotated/foreign): vision extraction returns structured fields **plus a confidence**; low confidence → the assistant asks the user to confirm rather than fabricating a transaction.
-- **Ambiguous question:** the agent states an explicit assumption or asks one clarifying question.
-- **Unanswerable from data:** says so plainly; no invented numbers.
-- **Contradictions / expensive queries:** bounded tools, timeouts, and rollups keep the system honest and cheap.
+MVP built for real:
 
----
+- SuperTokens auth + user records.
+- CSV import with dedupe, skipped-row report, and transaction inserts.
+- Spending questions through `query_spending` and `list_transactions`.
+- Trend comparison through `compare_periods` on `DailyRollup` (bucketed to week/month/year).
+- User context memory through `save_user_fact` / `get_user_facts`.
 
-## 12. Testing strategy (unit tests required)
+Stretch:
 
-- **api + worker:** Jest + `@swc/jest`. **web:** Vitest + happy-dom + React Testing Library.
-- LLM calls mocked in unit tests.
-- **High-value unit tests:**
-  - CSV parse + dedupe (duplicates, missing fields, junk rows).
-  - Rollup math + `compare_periods` (delta %, baseline averaging).
-  - **`run_readonly_sql` validator** — explicit injection/escape/multi-statement/system-table attempts.
-  - Each tool handler against a mocked DB.
-  - `AIHelper` model selection (dev vs prod, vision routing).
-  - Receipt extraction parsing (well-formed + low-confidence).
-- **Stretch:** Testcontainers integration test proving RLS isolation across two users.
+- Receipt OCR: upload image -> multimodal extraction -> transaction, with low-confidence confirmation.
+
+Stubbed/described:
+
+- Subscriptions, anomaly detection, budgets, merchant web lookup, summaries, and cut-back suggestions.
 
 ---
 
-## 13. Environment variables
+## 9. Edge Cases
+
+- Messy CSV: duplicates skipped, missing fields reported, junk rows counted.
+- Ambiguous question: assistant states an assumption or asks one clarifying question.
+- Unanswerable question: assistant says what data or capability is missing.
+- Expensive request: tools stay bounded and prefer rollups for long-history comparisons.
+- Bad receipt image: stretch OCR returns confidence; low confidence asks for confirmation.
+
+---
+
+## 10. Testing Strategy
+
+High-value tests:
+
+- CSV parse + dedupe.
+- Rollup math and `compare_periods`.
+- Tool handlers include current `userId` in every query.
+- Spending tools filter `amount < 0` so income does not offset expenses.
+- `list_transactions` caps rows at 50.
+- AIHelper model routing.
+- Receipt parsing only if stretch OCR is built.
+
+---
+
+## 11. Environment Variables
 
 ```
-# core
-NODE_ENV, PORT, CLIENT_ORIGIN, API_DOMAIN
-DATABASE_URL                 # app role
-DATABASE_URL_RO              # read-only role (SELECT only) for run_readonly_sql
+NODE_ENV
+PORT
+CLIENT_ORIGIN
+DATABASE_URL
 REDIS_URL
-
-# auth
-SUPERTOKENS_CORE_URL, SUPERTOKENS_API_KEY
-
-# ai
-AI_ENV=dev|prod              # selects dev/prod branch in AIHelper
-LOCAL_AI_BASE_URL            # gpt-oss openai-compatible endpoint
+SUPERTOKENS_CORE_URL
+SUPERTOKENS_API_KEY
+AI_ENV=dev|prod
+LOCAL_AI_BASE_URL
 GROQ_API_KEY
-CHAT_MODEL, AI_PROVIDER, AI_REASONING_EFFORT   # optional overrides
-
-# worker
+CHAT_MODEL
+AI_PROVIDER
+AI_REASONING_EFFORT
 WORKER_CONCURRENCY=5
 ```
 
-Validated by `packages/config` (zod) at boot; api and worker each have their own schema extending a shared base.
-
 ---
 
-## 14. Roadmap (phased; tests within each phase)
+## 12. Definition Of Done
 
-| Phase | Deliverable | Tests added | ~Time |
-|---|---|---|---|
-| 0 | Monorepo scaffold, Turbo, tsconfig, docker-compose (pg+redis+supertokens), `packages/config` | config env validation | 0:45 |
-| 1 | Prisma schema + migrations + **RLS** + CSV seed script | dedupe-hash unit | 0:45 |
-| 2 | SuperTokens auth + user sync (signUp override) + protected routes | — | 0:30 |
-| 3 | `packages/ai` AIHelper port + `/ai/chat` streaming + web chat UI (useChat + shadcn) | AIHelper model selection | 1:00 |
-| 4 | Tools: `query_spending`, `list_transactions`, facts (wired into chat) | tool handlers | 0:45 |
-| 5 | Worker + queue: CSV import job + rollup maintenance + `compare_periods` | CSV import, rollup math | 1:00 |
-| 7 | README/design note + test pass + polish | — | 0:15+ |
-| **S1** *(stretch)* | Safe `run_readonly_sql` fallback: validator + RO executor + wire into tools | validator (injection) | 1:00 |
-| **S2** *(stretch)* | Receipt OCR: upload → worker vision job → transaction | extraction parsing | 0:45 |
-
-**MVP = Phases 0→5 then Phase 7** (working multi-user assistant: spending + trend questions over imported data, with memory). Stretch items **S1 then S2**, in that priority order, only if time remains. RLS is built in Phase 1 (MVP) because it is required for multi-user isolation; it also backstops S1 if/when that lands.
-
----
-
-## 15. Assumptions, trade-offs, limitations
-
-- Single-agent tool loop over multi-agent — cheaper, lower latency, sufficient for these tasks.
-- Process-and-discard receipts — prod would persist originals to S3.
-- Monthly rollup granularity — daily/weekly is a future axis.
-- gpt-oss text-only → receipts route to a multimodal model.
-- 6h means most of the 10 capabilities are intentionally stubbed; the rollup + tool + RLS infra is the foundation they'd build on.
-- Sign convention (spend negative) is a documented assumption about the input data; the importer normalizes to it.
-
----
-
-## 16. Definition of done (for the build window)
-
-- `docker compose up` brings the stack up; migrations + RLS applied.
-- A user can sign up, import the sample CSV, and ask: "how much did I spend on groceries last month?", "what was my biggest purchase in March?", "am I spending more than usual this month?" — and get correct, fast answers backed by the DB, not the prompt.
-- The assistant remembers a stated fact and applies it.
-- *(Stretch)* The read-only SQL fallback answers an off-catalog question and provably cannot escape the user's rows or write.
-- Unit tests pass for the high-value targets in §12.
-- README explains approach, decisions, trade-offs, and exactly what is stubbed/skipped.
+- `docker compose up` starts Postgres, Redis, SuperTokens, API, and worker.
+- A user can sign up/sign in.
+- A user can import the sample CSV.
+- The assistant correctly answers:
+  - "How much did I spend on groceries last month?"
+  - "What was my biggest purchase in March?"
+  - "Am I spending more than usual this month?"
+- The assistant remembers a stated fact and applies it later.
+- Unit tests pass for CSV parsing, rollups, tools, and model routing.
+- README explains setup, architecture, scale strategy, trade-offs, and skipped features.

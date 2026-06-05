@@ -1,0 +1,25 @@
+{
+  "name": "@walletwise/ai",
+  "version": "0.0.0",
+  "private": true,
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "jest"
+  },
+  "dependencies": {
+    "ai": "^6.0.49",
+    "@ai-sdk/groq": "^3.0.15",
+    "@ai-sdk/openai-compatible": "^2.0.13",
+    "@walletwise/config": "workspace:*"
+  },
+  "devDependencies": {
+    "jest": "^29",
+    "@swc/jest": "^0.2",
+    "@types/jest": "^29",
+    "@types/node": "^22",
+    "typescript": "^5.5.2"
+  }
+}

@@ -1,0 +1,83 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        String   @id @default(uuid())
+  authId    String   @unique
+  email     String   @unique
+  createdAt DateTime @default(now())
+}
+
+model Account {
+  id     String @id @default(uuid())
+  userId String
+  name   String
+  type   String
+}
+
+model Transaction {
+  id           String   @id @default(uuid())
+  userId       String
+  accountId    String?
+  postedAt     DateTime
+  amount       Decimal
+  currency     String   @default("USD")
+  merchantRaw  String
+  merchantNorm String?
+  category     String?
+  source       String
+  dedupeHash   String
+  createdAt    DateTime @default(now())
+
+  @@unique([userId, dedupeHash])
+  @@index([userId, postedAt])
+  @@index([userId, category, postedAt])
+}
+
+model DailyRollup {
+  userId      String
+  day         DateTime
+  category    String
+  txnCount    Int
+  totalAmount Decimal
+
+  @@id([userId, day, category])
+}
+
+model UserFact {
+  id        String   @id @default(uuid())
+  userId    String
+  key       String
+  value     String
+  kind      String
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+}
+
+model Budget {
+  id           String  @id @default(uuid())
+  userId       String
+  category     String
+  monthlyLimit Decimal
+}
+
+model ImportJob {
+  id           String   @id @default(uuid())
+  userId       String
+  status       String
+  rowsTotal    Int      @default(0)
+  rowsImported Int      @default(0)
+  rowsSkipped  Int      @default(0)
+  report       Json?
+  createdAt    DateTime @default(now())
+}

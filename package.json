@@ -1,0 +1,40 @@
+{
+  "name": "@walletwise/workspace",
+  "private": true,
+  "packageManager": "pnpm@10.33.4",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "dotenv -e infra/compose/.env.dev -- turbo run dev --filter @walletwise/api --filter @walletwise/web --filter @walletwise/worker",
+    "build": "turbo run build",
+    "test": "turbo run test",
+    "lint": "turbo run lint",
+    "typecheck": "turbo run typecheck",
+    "infra:up": "docker compose --env-file infra/compose/.env.dev -f infra/compose/docker-compose.yml up -d postgres supertokens-db supertokens redis",
+    "infra:down": "docker compose --env-file infra/compose/.env.dev -f infra/compose/docker-compose.yml down",
+    "infra:logs": "docker compose --env-file infra/compose/.env.dev -f infra/compose/docker-compose.yml logs -f",
+    "db:migrate": "dotenv -e infra/compose/.env.dev -- pnpm -C infra/db migrate:deploy",
+    "db:seed": "dotenv -e infra/compose/.env.dev -- pnpm -C infra/db seed",
+    "compose:up": "docker compose --env-file infra/compose/.env.dev -f infra/compose/docker-compose.yml up -d --build",
+    "compose:down": "docker compose --env-file infra/compose/.env.dev -f infra/compose/docker-compose.yml down -v"
+  },
+  "devDependencies": {
+    "@swc-node/register": "^1.11.1",
+    "dotenv-cli": "^7.4.2",
+    "prettier": "^3.3.2",
+    "turbo": "^2.0.0",
+    "typescript": "^5.5.2"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "@prisma/client",
+      "@prisma/engines",
+      "esbuild",
+      "prisma"
+    ],
+    "overrides": {
+      "ioredis": "5.10.1"
+    }
+  }
+}
