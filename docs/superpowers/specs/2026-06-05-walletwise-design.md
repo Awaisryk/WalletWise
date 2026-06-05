@@ -39,7 +39,7 @@ The assistant can only access data through fixed, typed tools.
 - Production deployment.
 - Object storage for receipt images.
 - Vector memory and multi-agent orchestration.
-- Daily/weekly rollups; monthly rollups are enough for the assessment.
+- Sub-daily or per-merchant rollups. Rollups are stored at a **daily** grain and bucketed into week/month/year in code.
 
 ---
 
@@ -101,13 +101,13 @@ model Transaction {
   @@index([userId, category, postedAt])
 }
 
-model MonthlyRollup {
+model DailyRollup {
   userId      String
-  month       DateTime                  // first day of month, UTC
+  day         DateTime                  // first instant of day, UTC
   category    String
   txnCount    Int
   totalAmount Decimal                   // positive spend total from amount < 0
-  @@id([userId, month, category])
+  @@id([userId, day, category])
 }
 
 model UserFact {
@@ -189,8 +189,8 @@ Tool catalog:
 
 | Tool | Purpose | Data access |
 |---|---|---|
-| `query_spending` | Spend total for category/merchant/date range | Monthly rollups for whole-month category queries; otherwise indexed raw aggregate with `amount < 0` |
-| `compare_periods` | Current period vs baseline | `MonthlyRollup` only |
+| `query_spending` | Spend total for category/merchant/date range | Indexed raw aggregate with `amount < 0` |
+| `compare_periods` | Current period vs baseline, at week/month/year granularity | `DailyRollup` only (days bucketed into periods) |
 | `list_transactions` | Biggest purchase / recent rows | Raw transactions, capped at 50, filtered to current user |
 | `save_user_fact` | Remember user preference/context | `UserFact` write for current user |
 | `get_user_facts` | Retrieve remembered context | `UserFact` read for current user |
@@ -210,7 +210,7 @@ The long-history strategy is deliberate:
 
 1. **Never put raw history in the prompt.** The LLM receives compact query results, not years of transactions.
 2. **Use indexed raw queries only for narrow drilldowns.** For example, biggest purchase in March reads a bounded date range for the current user.
-3. **Use monthly rollups for trend questions.** CSV import and new transactions enqueue a rollup rebuild. "Am I spending more than usual this month?" reads a few monthly rows, not the full ledger.
+3. **Use daily rollups for trend questions.** CSV import and new transactions enqueue a rollup rebuild that recomputes per-day, per-category totals. `compare_periods` buckets those days into the requested granularity (week/month/year) and compares the current period against a trailing baseline — "Am I spending more than usual this month/this week?" reads a few dozen rollup rows, not the full ledger.
 
 Production extensions described in the README: Redis caching for hot aggregates, table partitioning by month, read replicas, and more rollup grains if product questions need them.
 
@@ -223,7 +223,7 @@ MVP built for real:
 - SuperTokens auth + user records.
 - CSV import with dedupe, skipped-row report, and transaction inserts.
 - Spending questions through `query_spending` and `list_transactions`.
-- Trend comparison through `compare_periods` on `MonthlyRollup`.
+- Trend comparison through `compare_periods` on `DailyRollup` (bucketed to week/month/year).
 - User context memory through `save_user_fact` / `get_user_facts`.
 
 Stretch:

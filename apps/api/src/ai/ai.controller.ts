@@ -160,7 +160,7 @@ export class AiController {
     // Prisma query they run is scoped to the current user. The LLM only supplies
     // non-identity inputs (dates, category, merchant, limit) — it can never set
     // `userId`.
-    const tools = buildTools({ prisma: this.prisma, userId });
+    const tools = buildTools({ prisma: this.prisma, userId, today: new Date() });
 
     // onFinish is intentionally minimal for this phase — no message persistence
     // yet (Phase 4/later). Just log the turn finish reason for observability.

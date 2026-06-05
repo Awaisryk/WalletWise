@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import type { Tool } from 'ai';
-import { periodDelta } from '@walletwise/contracts';
+import { periodDelta, bucketDailyTotals, currentPeriodKey } from '@walletwise/contracts';
 import type { PrismaService } from '../../prisma/prisma.service';
 import { createTool } from './tool-wrapper';
 
@@ -20,9 +20,16 @@ import { createTool } from './tool-wrapper';
 export function buildTools({
   prisma,
   userId,
+  today = new Date(),
 }: {
   prisma: PrismaService;
   userId: string;
+  /**
+   * "Now", used to anchor `compare_periods`' current period to the real
+   * calendar period (UTC) rather than to the most recent period that happens to
+   * have data. Server-supplied (never from the LLM); defaults to the wall clock.
+   */
+  today?: Date;
 }): Record<string, Tool> {
   const tools = {
     /**
@@ -108,68 +115,69 @@ export function buildTools({
     }),
 
     /**
-     * Current month vs the trailing baseline average. Reads precomputed
-     * `MonthlyRollup` rows ONLY (never raw transactions) — these are the scale
-     * lever per spec §9. Scoped to `userId`; `totalAmount` rollups are already
-     * positive spend totals (`sum(abs(amount))`).
+     * Most-recent-period spend vs the trailing baseline average, at a selectable
+     * granularity (week / month / year). Reads precomputed `DailyRollup` rows
+     * ONLY (never raw transactions) — the scale lever per spec §9 — scoped to
+     * `userId`; `totalAmount` rollups are already positive spend totals
+     * (`sum(abs(amount))`).
      *
-     * Aggregation: pull the user's rollup rows (optionally filtered to one
-     * category) newest-first, sum `totalAmount` per month (collapsing the
-     * per-category rows into one figure per month when no category filter is
-     * given), then treat the most recent month as `current` and the next
-     * `months` months (default 3) as the baseline window.
+     * Daily rollups are bucketed into periods (`bucketDailyTotals`) so the same
+     * stored grain answers "this week / month / year vs usual". The most recent
+     * bucket is `current`; the next `lookback` buckets form the baseline window.
      */
     compare_periods: createTool({
       name: 'compare_periods',
       description:
-        'Compare the user\'s most recent month of spending against the trailing baseline average, using precomputed monthly rollups (not raw transactions). Optionally restrict to one category. "months" is the baseline window length (default 3). Returns the current-month total, the baseline average, and the percent change (deltaPct, null when there is no usable baseline).',
+        'Compare the user\'s most recent period of spending against the trailing baseline average, using precomputed daily rollups (not raw transactions). granularity selects the period size: "week", "month" (default), or "year". Optionally restrict to one category. "lookback" is the number of prior periods in the baseline (default 3). Returns the current-period total, the baseline average, the percent change (deltaPct, null when there is no usable baseline), the granularity, and the current period label.',
       inputSchema: z.object({
         category: z.string().optional(),
-        months: z.number().optional().describe('baseline window, default 3'),
+        granularity: z.enum(['week', 'month', 'year']).optional(),
+        lookback: z.number().optional().describe('baseline window length in periods, default 3'),
       }),
-      execute: async ({ category, months }) => {
-        const rows = await prisma.monthlyRollup.findMany({
+      execute: async ({ category, granularity, lookback }) => {
+        const gran = granularity ?? 'month';
+        const window = lookback ?? 3;
+
+        // Read this user's daily rollups (optionally one category), newest-first.
+        // These are pre-aggregated per (day, category), so even years of history
+        // is far smaller than the raw ledger. (For very long histories this read
+        // could be date-bounded to the needed window; unbounded is fine here.)
+        const rows = await prisma.dailyRollup.findMany({
           where: { userId, ...(category ? { category: { equals: category, mode: 'insensitive' as const } } : {}) },
-          orderBy: { month: 'desc' },
+          orderBy: { day: 'desc' },
+          select: { day: true, totalAmount: true },
         });
 
-        if (rows.length === 0) {
-          return {
-            current: 0,
-            baseline: 0,
-            deltaPct: null,
-            note: 'no rollup data yet',
-            inputSummary: { category, months },
-          };
-        }
+        const buckets = bucketDailyTotals(
+          rows.map((r) => ({ day: r.day, total: Number(r.totalAmount) })),
+          gran,
+        );
 
-        // Sum totalAmount per month (across categories when unfiltered),
-        // preserving the descending month order. A Map keyed by the month's ISO
-        // string collapses the per-category rows into one total per month.
-        const perMonth = new Map<string, { month: Date; total: number }>();
-        for (const r of rows) {
-          const key = r.month.toISOString();
-          const entry = perMonth.get(key);
-          if (entry) {
-            entry.total += Number(r.totalAmount);
-          } else {
-            perMonth.set(key, { month: r.month, total: Number(r.totalAmount) });
-          }
-        }
-        // Map preserves insertion order, which is already month-descending.
-        const monthlyTotals = [...perMonth.values()];
+        // Anchor "current" to the REAL calendar period that contains today — not
+        // to "the most recent period that has data". Otherwise, asked "am I
+        // spending more than usual this month?" on a day when the current month
+        // has no spend yet, we'd silently report a past month as "current".
+        const currentKey = currentPeriodKey(today, gran);
+        const currentBucket = buckets.find((b) => b.key === currentKey);
+        const current = currentBucket ? currentBucket.total : 0;
 
-        const window = months ?? 3;
-        const current = monthlyTotals[0]!.total;
-        const baselineMonths = monthlyTotals.slice(1, 1 + window).map((m) => m.total);
-        const d = periodDelta({ current, baselineMonths });
+        // Baseline = the periods strictly BEFORE the current one (newest-first),
+        // which excludes the current period itself and any future-dated buckets.
+        const baselineValues = buckets
+          .filter((b) => b.key < currentKey)
+          .slice(0, window)
+          .map((b) => b.total);
+        const d = periodDelta({ current, baselineValues });
 
         return {
           current: d.current,
           baseline: d.baseline,
           deltaPct: d.deltaPct,
-          currentMonth: monthlyTotals[0]!.month.toISOString(),
-          inputSummary: { category, months: window },
+          granularity: gran,
+          currentPeriod: currentKey,
+          currentPeriodHasData: Boolean(currentBucket),
+          ...(currentBucket ? {} : { note: `no spending recorded in the current ${gran} yet` }),
+          inputSummary: { category, granularity: gran, lookback: window },
         };
       },
     }),

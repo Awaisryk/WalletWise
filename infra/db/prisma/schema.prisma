@@ -43,14 +43,14 @@ model Transaction {
   @@index([userId, category, postedAt])
 }
 
-model MonthlyRollup {
+model DailyRollup {
   userId      String
-  month       DateTime
+  day         DateTime
   category    String
   txnCount    Int
   totalAmount Decimal
 
-  @@id([userId, month, category])
+  @@id([userId, day, category])
 }
 
 model UserFact {

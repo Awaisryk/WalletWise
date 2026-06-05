@@ -20,16 +20,18 @@ function makePrisma() {
   const factFindMany = jest.fn(async () => [
     { key: 'payday', value: '1st', kind: 'income' },
   ]);
-  // Two months for the same category, newest-first (matches the tool's
-  // orderBy: { month: 'desc' }). `totalAmount` is a positive spend total.
+  // Daily rollups, newest-first (matches the tool's orderBy: { day: 'desc' }).
+  // `totalAmount` is a positive spend total. These days bucket into May 2026
+  // (180 + 120 = 300) and April 2026 (200) for the default monthly granularity.
   const rollupFindMany = jest.fn(async () => [
-    { userId: 'u1', month: new Date('2026-05-01T00:00:00Z'), category: 'groceries', txnCount: 4, totalAmount: 300 },
-    { userId: 'u1', month: new Date('2026-04-01T00:00:00Z'), category: 'groceries', txnCount: 3, totalAmount: 200 },
+    { day: new Date('2026-05-20T00:00:00Z'), totalAmount: 180 },
+    { day: new Date('2026-05-05T00:00:00Z'), totalAmount: 120 },
+    { day: new Date('2026-04-10T00:00:00Z'), totalAmount: 200 },
   ]);
   const prisma: any = {
     transaction: { aggregate, findMany },
     userFact: { create: factCreate, findMany: factFindMany },
-    monthlyRollup: { findMany: rollupFindMany },
+    dailyRollup: { findMany: rollupFindMany },
   };
   return { prisma, aggregate, findMany, factCreate, factFindMany, rollupFindMany };
 }
@@ -143,39 +145,79 @@ describe('buildTools', () => {
     expect(r.facts).toEqual([{ key: 'payday', value: '1st', kind: 'income' }]);
   });
 
-  it('compare_periods reads MonthlyRollup scoped to userId and returns periodDelta', async () => {
+  it('compare_periods reads DailyRollup scoped to userId and buckets days into monthly periods anchored on today', async () => {
     const { prisma, rollupFindMany } = makePrisma();
-    const tools = buildTools({ prisma, userId: 'u1' });
+    // today is in May 2026, so the current month is May.
+    const tools = buildTools({ prisma, userId: 'u1', today: new Date('2026-05-25T00:00:00Z') });
     const r: any = await tools.compare_periods.execute({ category: 'groceries' }, {} as any);
 
-    // Reads rollups only, scoped by userId, with the category filter applied.
+    // Reads daily rollups only, scoped by userId, with the category filter applied.
     expect(rollupFindMany).toHaveBeenCalledWith(
       expect.objectContaining({
         where: expect.objectContaining({
           userId: 'u1',
           category: { equals: 'groceries', mode: 'insensitive' },
         }),
-        orderBy: { month: 'desc' },
+        orderBy: { day: 'desc' },
       }),
     );
 
-    // current = newest month (300); baseline = trailing month(s) avg (200).
-    const expected = periodDelta({ current: 300, baselineMonths: [200] });
+    // current = the May bucket (180+120=300); baseline = the prior April bucket (200).
+    const expected = periodDelta({ current: 300, baselineValues: [200] });
     expect(r.current).toBe(expected.current);
     expect(r.baseline).toBe(expected.baseline);
-    expect(r.deltaPct).toBeCloseTo(expected.deltaPct as number);
     expect(r.deltaPct).toBeCloseTo(50);
-    expect(r.currentMonth).toBe('2026-05-01T00:00:00.000Z');
+    expect(r.granularity).toBe('month');
+    expect(r.currentPeriod).toBe('2026-05');
+    expect(r.currentPeriodHasData).toBe(true);
+  });
+
+  it('compare_periods anchors "current" to today and reports 0 when the current period has no data', async () => {
+    // today is in June 2026, but the mock data only has May + April rollups, so
+    // the CURRENT month (June) is empty — it must report 0, not silently report
+    // May as "current".
+    const { prisma } = makePrisma();
+    const tools = buildTools({ prisma, userId: 'u1', today: new Date('2026-06-05T00:00:00Z') });
+    const r: any = await tools.compare_periods.execute({}, {} as any);
+    expect(r.currentPeriod).toBe('2026-06');
+    expect(r.current).toBe(0);
+    expect(r.currentPeriodHasData).toBe(false);
+    expect(r.note).toMatch(/no spending recorded in the current month/);
+    // baseline = the prior months that DO have data (May 300, April 200) => avg 250.
+    expect(r.baseline).toBe(250);
+    expect(r.deltaPct).toBeCloseTo(-100); // spent nothing vs a 250 baseline
+  });
+
+  it('compare_periods supports yearly granularity', async () => {
+    const { prisma, rollupFindMany } = makePrisma();
+    rollupFindMany.mockResolvedValueOnce([
+      { day: new Date('2026-03-01T00:00:00Z'), totalAmount: 500 },
+      { day: new Date('2025-08-01T00:00:00Z'), totalAmount: 400 },
+    ]);
+    const tools = buildTools({ prisma, userId: 'u1', today: new Date('2026-03-15T00:00:00Z') });
+    const r: any = await tools.compare_periods.execute({ granularity: 'year' }, {} as any);
+    expect(r.granularity).toBe('year');
+    expect(r.current).toBe(500); // 2026
+    expect(r.baseline).toBe(400); // 2025
+    expect(r.currentPeriod).toBe('2026');
   });
 
   it('compare_periods returns a no-data result when there are no rollups', async () => {
     const { prisma, rollupFindMany } = makePrisma();
     rollupFindMany.mockResolvedValueOnce([]);
-    const tools = buildTools({ prisma, userId: 'u1' });
+    const tools = buildTools({ prisma, userId: 'u1', today: new Date('2026-06-15T00:00:00Z') });
     const r: any = await tools.compare_periods.execute({}, {} as any);
     expect(rollupFindMany).toHaveBeenCalledWith(
       expect.objectContaining({ where: expect.objectContaining({ userId: 'u1' }) }),
     );
-    expect(r).toEqual({ current: 0, baseline: 0, deltaPct: null, note: 'no rollup data yet' });
+    expect(r).toEqual({
+      current: 0,
+      baseline: 0,
+      deltaPct: null,
+      granularity: 'month',
+      currentPeriod: '2026-06',
+      currentPeriodHasData: false,
+      note: 'no spending recorded in the current month yet',
+    });
   });
 });

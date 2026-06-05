@@ -28,10 +28,9 @@ export interface ImportCsvPayload {
   csv: string;
 }
 
-/** Payload for `JOBS.ROLLUP_REBUILD`. `month` is `YYYY-MM`; omit to rebuild all months. */
+/** Payload for `JOBS.ROLLUP_REBUILD`. The worker fully rebuilds this user's daily rollups. */
 export interface RollupRebuildPayload {
   userId: string;
-  month?: string;
 }
 
 /** Payload for `JOBS.RECEIPT_OCR` (stretch). */

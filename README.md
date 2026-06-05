@@ -86,7 +86,7 @@ AiController ── builds the tool catalog scoped to userId ── runChat() (a
    │      ▼                                                             │
    │   model decides → calls a typed tool (query_spending, …)           │
    │      ▼                                                             │
-   │   tool runs an indexed Postgres aggregate / reads MonthlyRollup    │
+   │   tool runs an indexed Postgres aggregate / reads daily rollups    │
    │      ▼   (bounded result: a total, a delta, or ≤50 rows)           │
    │   result fed back to the model ────────────────────────────────────┘
    ▼
@@ -96,7 +96,7 @@ streamed tokens → browser, plus per-turn + cumulative cost in message metadata
 The data layer is split by access pattern:
 
 - **Spending totals / drilldowns** hit indexed raw `Transaction` aggregates for the current user (`query_spending`, `list_transactions`).
-- **Trends** (*"more than usual?"*) read pre-computed `MonthlyRollup` rows (`compare_periods`) — never raw rows.
+- **Trends** (*"more than usual?"*) read pre-computed `DailyRollup` rows, bucketed into the requested period (`compare_periods`) — never raw rows.
 
 ### Import / queue flow
 
@@ -104,7 +104,7 @@ The data layer is split by access pattern:
 POST /import/csv → creates an ImportJob (pending) + enqueues import.csv  →  202-style { jobId }
 web polls GET /import/:id  ──────────────────────────────────────────────────────────────────┐
 worker: import.csv → parse + dedupe + createMany(skipDuplicates) → write report → enqueue rollup.rebuild
-worker: rollup.rebuild → DELETE+INSERT this user's MonthlyRollup from amount<0 (idempotent)
+worker: rollup.rebuild → DELETE+INSERT this user's DailyRollup (per day+category) from amount<0 (idempotent)
 ```
 
 The API never parses the CSV inline — it hands the work to the worker so a large file doesn't block the request, and so import + rollup maintenance are retryable BullMQ jobs.
@@ -119,11 +119,11 @@ This is the core design decision, and it's about **what the LLM never sees**.
 
 2. **Aggregates run in the database, on indexes.** `query_spending` is a `SUM`/`COUNT` filtered by `userId` + date range (+ optional category/merchant). The schema carries composite indexes `(userId, postedAt)` and `(userId, category, postedAt)`, so these stay index-range scans rather than full-table reads as history grows.
 
-3. **Trend questions read monthly rollups, so their cost is flat.** Every import (and any future write) enqueues a `rollup.rebuild` that recomputes the user's per-month, per-category spend totals into `MonthlyRollup`. *"Am I spending more than usual this month?"* reads a handful of monthly rows and compares the latest month to a trailing baseline average — it does **not** scan years of transactions. The rebuild is a `DELETE + INSERT` for one user inside a single transaction, which makes it idempotent under retries and back-to-back imports.
+3. **Trend questions read daily rollups, so their cost is flat.** Every import (and any future write) enqueues a `rollup.rebuild` that recomputes the user's per-day, per-category spend totals into `DailyRollup`. `compare_periods` then **buckets those days into the requested granularity** — week, month (default), or year — and compares the most recent period to a trailing baseline average. *"Am I spending more than usual this month?"* and *"...this week?"* both read the same compact daily rows (dozens, not years of transactions); the period view is derived in code. The rebuild is a `DELETE + INSERT` for one user inside a single transaction, which makes it idempotent under retries and back-to-back imports.
 
 4. **Tool outputs are bounded by construction.** `list_transactions` caps `limit` at 50 server-side regardless of what the model asks for; aggregating tools return scalars. There is no tool that can return "all transactions".
 
-**Production extensions (described, not built):** Redis caching of hot aggregates (the same "spend last month" recomputed across turns); Postgres table partitioning of `Transaction` by month so old partitions are rarely touched; read replicas for the analytical aggregate queries; and finer rollup grains (weekly/daily, or per-merchant) if product questions demand them. The current monthly grain is sufficient for the questions in scope.
+**Production extensions (described, not built):** Redis caching of hot aggregates (the same "spend last month" recomputed across turns); Postgres table partitioning of `Transaction` by month so old partitions are rarely touched; read replicas for the analytical aggregate queries; date-bounding the rollup read to just the needed window (today it reads all of a user's daily rollups — still tiny, but bounded would scale further); and per-merchant rollups if product questions demand them. The daily grain already covers week/month/quarter/year comparisons by bucketing.
 
 ---
 
@@ -162,7 +162,7 @@ Isolation is **application-level and enforced on every query**:
 - SuperTokens email/password auth; on sign-up the API upserts a `User { authId, email }`.
 - CSV import: async via the worker, with dedupe (per-user `dedupeHash`), a skipped-row report (duplicate / missing-field / malformed), and `createMany({ skipDuplicates: true })`.
 - Spending Q&A: `query_spending` (totals) and `list_transactions` (recent rows / biggest purchase).
-- Trend comparison: `compare_periods` over `MonthlyRollup`.
+- Trend comparison: `compare_periods` over `DailyRollup`, bucketed to week/month/year.
 - User memory: `save_user_fact` / `get_user_facts`; remembered facts are also prepended to the system prompt so they apply from the first token.
 - Per-turn + cumulative cost calculation, streamed to the client.
 
@@ -186,7 +186,7 @@ Isolation is **application-level and enforced on every query**:
 ## Trade-offs & limitations
 
 - **Single agent, single tool loop.** One `streamText` loop bounded at 8 steps gathers data through tools then answers. Simple and debuggable; no multi-agent orchestration or planning layer (out of scope, and not needed for these questions).
-- **Monthly rollup grain.** Trend comparisons are month-over-month. Week-over-week or "last 7 days vs the previous 7" would need a finer rollup grain — a deliberate cut for the build window.
+- **Daily rollup grain, partial current period.** `compare_periods` buckets daily rollups into week/month/year, so the most recent *bucket* (e.g. the current month) may be partial when compared against complete prior periods — fine for "more than usual so far?", but a same-day-of-period comparison (e.g. "month-to-date vs the same point last month") would need extra logic. A deliberate cut for the build window.
 - **Rollups rebuilt, not incrementally updated.** Each import does a full per-user `DELETE + INSERT`. Correct and idempotent, but at very large per-user volumes an incremental upsert (touching only affected months) would be cheaper.
 - **CSV rides in the job payload.** Fine for the assessment's file sizes; very large files would warrant streaming from object storage instead of carrying the text through Redis.
 - **Receipts (if built) would be process-and-discard.** The image yields a transaction; no object storage is in scope, so the image itself wouldn't be retained.
@@ -206,7 +206,7 @@ pnpm -w build       # tsc builds + a Vite production build of the web app
 
 - **CSV parse + dedupe** (`packages/contracts`): duplicate/missing/malformed classification, sign preservation, stable hashing (same inputs ⇒ same hash; different amount or user ⇒ different hash).
 - **Rollup math** (`packages/contracts`): baseline average, percent delta, and `null` delta when the baseline is zero.
-- **Tool handlers** (`apps/api`): every query is **scoped to `userId`**; `query_spending` filters `amount < 0` and returns a positive total (income does not offset spending); `list_transactions` caps `limit` at 50 and "biggest purchase" excludes income; `compare_periods` reads `MonthlyRollup` (not raw rows); user-fact writes carry `userId`.
+- **Tool handlers** (`apps/api`): every query is **scoped to `userId`**; `query_spending` filters `amount < 0` and returns a positive total (income does not offset spending); `list_transactions` caps `limit` at 50 and "biggest purchase" excludes income; `compare_periods` reads `DailyRollup` (not raw rows); user-fact writes carry `userId`.
 - **Model routing** (`packages/ai`): dev chat → local provider, prod chat → Groq gpt-oss, vision → multimodal.
 - **Cost calculation** (`packages/ai`): pricing per model and provider-tolerant usage normalization.
 - **Web util + env loader** smoke tests.
