@@ -44,7 +44,11 @@ describe('buildTools', () => {
     );
     expect(aggregate).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: expect.objectContaining({ userId: 'u1', amount: { lt: 0 }, category: 'groceries' }),
+        where: expect.objectContaining({
+          userId: 'u1',
+          amount: { lt: 0 },
+          category: { equals: 'groceries', mode: 'insensitive' },
+        }),
       }),
     );
     expect(r.total).toBe(42.5);
@@ -147,7 +151,10 @@ describe('buildTools', () => {
     // Reads rollups only, scoped by userId, with the category filter applied.
     expect(rollupFindMany).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: expect.objectContaining({ userId: 'u1', category: 'groceries' }),
+        where: expect.objectContaining({
+          userId: 'u1',
+          category: { equals: 'groceries', mode: 'insensitive' },
+        }),
         orderBy: { month: 'desc' },
       }),
     );

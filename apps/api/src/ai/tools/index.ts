@@ -46,7 +46,7 @@ export function buildTools({
             userId,
             amount: { lt: 0 },
             postedAt: { gte: new Date(from), lt: new Date(to) },
-            ...(category ? { category } : {}),
+            ...(category ? { category: { equals: category, mode: 'insensitive' as const } } : {}),
             ...(merchant ? { merchantRaw: { contains: merchant, mode: 'insensitive' } } : {}),
           },
           _sum: { amount: true },
@@ -85,7 +85,7 @@ export function buildTools({
           where: {
             userId,
             postedAt: { gte: new Date(from), lt: new Date(to) },
-            ...(category ? { category } : {}),
+            ...(category ? { category: { equals: category, mode: 'insensitive' as const } } : {}),
             // "Biggest purchase" must only consider spending, never income.
             ...(amountDesc ? { amount: { lt: 0 } } : {}),
           },
@@ -129,7 +129,7 @@ export function buildTools({
       }),
       execute: async ({ category, months }) => {
         const rows = await prisma.monthlyRollup.findMany({
-          where: { userId, ...(category ? { category } : {}) },
+          where: { userId, ...(category ? { category: { equals: category, mode: 'insensitive' as const } } : {}) },
           orderBy: { month: 'desc' },
         });
 

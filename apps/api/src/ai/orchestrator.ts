@@ -40,6 +40,13 @@ export interface RunChatParams {
    * run a tool-less turn.
    */
   tools?: ToolSet;
+  /**
+   * The dynamic `<runtime_context>` block (today, timezone, remembered facts).
+   * Injected as a reference message immediately before the latest user message
+   * so the system prompt + tool catalog stay byte-stable (cacheable) across
+   * turns and users. Omitted by server-internal callers/tests.
+   */
+  runtimeContext?: string;
 }
 
 export interface RunChatOptions {
@@ -62,7 +69,7 @@ export async function runChat(
   params: RunChatParams,
   opts?: RunChatOptions,
 ): Promise<StreamTextResult<ToolSet, never>> {
-  const { env, cfg, messages, system, tools } = params;
+  const { env, cfg, messages, system, tools, runtimeContext } = params;
 
   // UI messages carry a `parts` array; convert them to model messages. Plain
   // model-message arrays (no `parts`) are passed through untouched.
@@ -71,6 +78,24 @@ export async function runChat(
     incoming.length > 0 && (incoming[0] as { parts?: unknown }).parts
       ? await convertToModelMessages(incoming as UIMessage[])
       : (incoming as ModelMessage[]);
+
+  // Inject the dynamic <runtime_context> as a reference message immediately
+  // before the latest user message. Keeping it here (not in `system`) means the
+  // system prompt + tool catalog form a byte-stable, cacheable prefix; the
+  // volatile per-turn data rides late, closest to the question it informs.
+  //
+  // Role is `assistant`, NOT `system`: most chat models reject a `system` turn
+  // in the middle of a conversation. An assistant-authored reference block is
+  // broadly accepted, and `reference_context_rules` in the system prompt tells
+  // the model to treat `<runtime_context>` as data rather than instructions.
+  if (runtimeContext) {
+    const ref: ModelMessage = { role: 'assistant', content: runtimeContext };
+    if (modelMessages.length > 0) {
+      modelMessages.splice(modelMessages.length - 1, 0, ref);
+    } else {
+      modelMessages.push(ref);
+    }
+  }
 
   const providerOptions = AIHelper.getProviderOptions(AITask.CHAT, env);
   const chatModelConfig = AIHelper.getModelConfig(AITask.CHAT, env);
