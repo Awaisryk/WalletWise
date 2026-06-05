@@ -1,6 +1,10 @@
 import { createGroq } from '@ai-sdk/groq';
+import { createOpenAI } from '@ai-sdk/openai';
 import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
 import type { LanguageModel } from 'ai';
+
+/** Default OpenAI chat model when AI_PROVIDER=openai and OPENAI_MODEL is unset. */
+const DEFAULT_OPENAI_MODEL = 'gpt-5';
 
 /**
  * Return the first argument that is (or parses to) a finite number so
@@ -31,7 +35,7 @@ export enum AITask {
   PARSE_VISION = 'parse_vision',
 }
 
-export type AIProvider = 'local' | 'groq';
+export type AIProvider = 'local' | 'groq' | 'openai';
 
 export interface ModelConfig {
   provider: AIProvider;
@@ -61,32 +65,71 @@ const MAP: Record<AITask, { dev: ModelConfig; prod: ModelConfig }> = {
 export interface AICfg {
   GROQ_API_KEY?: string;
   LOCAL_AI_BASE_URL?: string;
+  /** Opt into OpenAI for chat by setting this to `'openai'`. */
+  AI_PROVIDER?: string;
+  OPENAI_API_KEY?: string;
+  /** OpenAI model id; defaults to `gpt-5`. */
+  OPENAI_MODEL?: string;
+}
+
+/** A gpt-5 / o-series OpenAI model only accepts the default temperature. */
+function isOpenAIReasoningModel(model: string): boolean {
+  return /^gpt-5/i.test(model) || /^o\d/i.test(model);
 }
 
 export class AIHelper {
-  /** The provider/model/temperature triple for a task+env. */
-  static getModelConfig(task: AITask, env: 'dev' | 'prod'): ModelConfig {
+  /**
+   * Resolve the effective {@link ModelConfig} for a task. CHAT honours an opt-in
+   * OpenAI override (`cfg.AI_PROVIDER === 'openai'`); everything else uses the
+   * dev/prod {@link MAP}. The override is CHAT-only so vision routing is
+   * unaffected.
+   */
+  static getModelConfig(task: AITask, env: 'dev' | 'prod', cfg?: AICfg): ModelConfig {
+    if (task === AITask.CHAT && cfg?.AI_PROVIDER === 'openai') {
+      return {
+        provider: 'openai',
+        model: cfg.OPENAI_MODEL?.trim() || DEFAULT_OPENAI_MODEL,
+        // gpt-5 reasoning models reject a custom temperature; getTemperature
+        // returns undefined for them so we never send one.
+        temperature: 1,
+      };
+    }
     return MAP[task][env];
   }
 
-  /** Just the temperature for a task+env (sugar over {@link getModelConfig}). */
-  static getTemperature(task: AITask, env: 'dev' | 'prod'): number {
-    return MAP[task][env].temperature;
+  /**
+   * Temperature for a task. Returns `undefined` for OpenAI reasoning models
+   * (gpt-5 / o-series) so the caller omits the field entirely — they only
+   * accept the default and the SDK warns otherwise.
+   */
+  static getTemperature(task: AITask, env: 'dev' | 'prod', cfg?: AICfg): number | undefined {
+    const c = this.getModelConfig(task, env, cfg);
+    if (c.provider === 'openai' && isOpenAIReasoningModel(c.model)) return undefined;
+    return c.temperature;
   }
 
   /**
-   * Construct the concrete language model for a task+env. Groq tasks use the
-   * Groq provider keyed off `GROQ_API_KEY`; the `local` provider talks to an
-   * OpenAI-compatible server (LM Studio default `http://localhost:1234/v1`).
+   * Construct the concrete language model for a task+env. `openai` uses the
+   * OpenAI provider keyed off `OPENAI_API_KEY`; `groq` uses Groq keyed off
+   * `GROQ_API_KEY`; `local` talks to an OpenAI-compatible server (LM Studio /
+   * Ollama, default `http://localhost:1234/v1`).
    */
   static getModel(task: AITask, env: 'dev' | 'prod', cfg: AICfg): LanguageModel {
-    const c = MAP[task][env];
+    const c = this.getModelConfig(task, env, cfg);
+    if (c.provider === 'openai') {
+      return createOpenAI({ apiKey: cfg.OPENAI_API_KEY })(c.model);
+    }
     if (c.provider === 'groq') {
       return createGroq({ apiKey: cfg.GROQ_API_KEY })(c.model);
     }
     return createOpenAICompatible({
       name: 'local',
       baseURL: cfg.LOCAL_AI_BASE_URL ?? 'http://localhost:1234/v1',
+      // Match the local server's capabilities: report token usage (so cost
+      // accounting still runs) and advertise structured-output support (needed
+      // for reliable tool calls from gpt-oss on an OpenAI-compatible endpoint).
+      includeUsage: true,
+      supportsStructuredOutputs: true,
     })(c.model);
   }
 
@@ -95,8 +138,12 @@ export class AIHelper {
    * knob — we pin it `low` for chat to keep latency/cost down. Returns
    * `undefined` when there is nothing to set so callers can spread it safely.
    */
-  static getProviderOptions(task: AITask, env: 'dev' | 'prod'): { groq: { reasoningEffort: 'low' } } | undefined {
-    const c = MAP[task][env];
+  static getProviderOptions(
+    task: AITask,
+    env: 'dev' | 'prod',
+    cfg?: AICfg,
+  ): { groq: { reasoningEffort: 'low' } } | undefined {
+    const c = this.getModelConfig(task, env, cfg);
     if (c.provider === 'groq' && c.model.includes('gpt-oss')) {
       return { groq: { reasoningEffort: 'low' as const } };
     }
@@ -132,8 +179,9 @@ export class AIHelper {
     },
     task: AITask,
     env: 'dev' | 'prod',
+    cfg?: AICfg,
   ): number {
-    const config = this.getModelConfig(task, env);
+    const config = this.getModelConfig(task, env, cfg);
     const normalizedUsage = this.normalizeUsage(usage);
     let inputCostPerM = 0;
     let cachedInputCostPerM = 0;
@@ -141,6 +189,24 @@ export class AIHelper {
 
     // Set pricing based on provider and model.
     switch (config.provider) {
+      case 'openai':
+        // Approximate OpenAI list prices ($/M tokens) for the gpt-5 family.
+        // These are estimates for the cost transient — verify against current
+        // OpenAI pricing if exactness matters.
+        if (config.model.includes('nano')) {
+          inputCostPerM = 0.05;
+          outputCostPerM = 0.4;
+        } else if (config.model.includes('mini')) {
+          inputCostPerM = 0.25;
+          outputCostPerM = 2.0;
+        } else {
+          // gpt-5 flagship.
+          inputCostPerM = 1.25;
+          outputCostPerM = 10.0;
+        }
+        cachedInputCostPerM = inputCostPerM * 0.1; // OpenAI cached input ≈ 10% of input
+        break;
+
       case 'groq':
         if (config.model.includes('llama-4-maverick')) {
           inputCostPerM = 0.2;

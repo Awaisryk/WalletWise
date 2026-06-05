@@ -3,6 +3,7 @@ import { useChat } from "@ai-sdk/react";
 import { DefaultChatTransport } from "ai";
 import type { UIMessage } from "ai";
 import { ArrowUp } from "lucide-react";
+import { Streamdown } from "streamdown";
 
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -100,13 +101,40 @@ export function ChatPanel() {
               >
                 <div
                   className={cn(
-                    "max-w-[80%] whitespace-pre-wrap rounded-lg px-3 py-2 text-sm",
+                    "max-w-[80%] rounded-lg px-3 py-2 text-sm",
                     message.role === "user"
                       ? "bg-primary text-primary-foreground"
                       : "bg-muted text-foreground",
                   )}
                 >
-                  {messageText(message)}
+                  {message.role === "user" ? (
+                    // User text is plain — preserve their line breaks, no markdown.
+                    <span className="whitespace-pre-wrap">{messageText(message)}</span>
+                  ) : (
+                    // Assistant replies are markdown (bold, bullets, tables, headings).
+                    // Streamdown renders them safely even while the stream is mid-token.
+                    // Tailwind's preflight strips list markers/heading sizes, so the
+                    // arbitrary-variant classes below restore readable formatting.
+                    <Streamdown
+                      className={cn(
+                        "size-full leading-relaxed",
+                        "[&>*:first-child]:mt-0 [&>*:last-child]:mb-0",
+                        "[&_p]:my-1.5 [&_ul]:my-1.5 [&_ol]:my-1.5 [&_li]:my-0.5",
+                        "[&_ul]:list-disc [&_ul]:pl-5 [&_ol]:list-decimal [&_ol]:pl-5",
+                        "[&_h1]:mb-1 [&_h1]:text-base [&_h1]:font-semibold",
+                        "[&_h2]:mb-1 [&_h2]:text-sm [&_h2]:font-semibold",
+                        "[&_h3]:font-semibold [&_strong]:font-semibold",
+                        "[&_a]:underline [&_a]:underline-offset-2",
+                        "[&_code]:rounded [&_code]:bg-black/10 [&_code]:px-1 [&_code]:py-0.5 [&_code]:text-[0.85em]",
+                        "[&_pre]:my-2 [&_pre]:overflow-x-auto [&_pre]:rounded-md [&_pre]:bg-black/5 [&_pre]:p-2",
+                        "[&_table]:my-2 [&_table]:w-full [&_table]:text-xs",
+                        "[&_th]:px-2 [&_th]:py-1 [&_th]:text-left [&_th]:font-semibold",
+                        "[&_td]:border-t [&_td]:border-black/10 [&_td]:px-2 [&_td]:py-1",
+                      )}
+                    >
+                      {messageText(message)}
+                    </Streamdown>
+                  )}
                 </div>
               </div>
             ))}

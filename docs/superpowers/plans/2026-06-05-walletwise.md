@@ -1,6 +1,6 @@
 # WalletWise Implementation Plan
 
-**Goal:** Build a narrow, working personal-finance assistant: users sign in with SuperTokens, import transactions from CSV, and ask natural-language spending questions answered through typed tools that query Postgres and monthly rollups. Raw transaction history is never sent to the LLM.
+**Goal:** Build a narrow, working personal-finance assistant: users sign in with SuperTokens, import transactions from CSV, and ask natural-language spending questions answered through typed tools that query Postgres and daily rollups. Raw transaction history is never sent to the LLM.
 
 **Architecture:** pnpm + Turbo monorepo. `apps/api` is NestJS + Fastify + Prisma for auth, chat streaming, tools, and uploads. `apps/web` is React + Vite + Tailwind + shadcn/ui. `apps/worker` is a NestJS application context with BullMQ for CSV import and rollup maintenance. Shared packages are `config`, `contracts`, and `ai`.
 
@@ -176,7 +176,7 @@ Models:
 - `User`
 - `Account`
 - `Transaction`
-- `MonthlyRollup`
+- `DailyRollup`
 - `UserFact`
 - `Budget`
 - `ImportJob`
@@ -187,14 +187,14 @@ Important fields:
 - `User.authId` is the SuperTokens id.
 - Other user-owned tables have `userId`.
 - `Transaction.amount`: negative spend, positive income.
-- `MonthlyRollup.totalAmount`: positive spend total from `amount < 0`.
+- `DailyRollup.totalAmount`: positive spend total from `amount < 0`.
 
 Indexes:
 
 - `Transaction @@unique([userId, dedupeHash])`
 - `Transaction @@index([userId, postedAt])`
 - `Transaction @@index([userId, category, postedAt])`
-- `MonthlyRollup @@id([userId, month, category])`
+- `DailyRollup @@id([userId, day, category])`
 
 Generate and migrate:
 
@@ -419,9 +419,17 @@ Create:
 
 Tools:
 
+- `get_data_status`
 - `query_spending`
 - `list_transactions`
 - `compare_periods` placeholder until Phase 5
+- `compare_spending_ranges`
+- `explain_spending_change`
+- `get_spending_breakdown`
+- `find_subscriptions`
+- `find_unusual_charges`
+- `set_budget`
+- `get_budget_status`
 - `save_user_fact`
 - `get_user_facts`
 
@@ -433,6 +441,10 @@ Implementation rules:
 - `query_spending` returns positive `total`
 - `list_transactions` caps `limit` at 50
 - "biggest purchase" sorts by most negative amount or absolute spend, not income
+- `compare_spending_ranges` is for explicit named date ranges and baseline averages
+- `explain_spending_change` returns total, category, and merchant deltas for "why did X cost more?"
+- `find_subscriptions` and `find_unusual_charges` present evidence, not certainty
+- budgets are simple per-category monthly limits
 - user facts are stored with the current `userId`
 
 Tests:
@@ -441,6 +453,9 @@ Tests:
 - `query_spending` includes `amount < 0`
 - income does not offset spending
 - `list_transactions` caps limit at 50
+- explicit range comparisons use the exact windows supplied
+- spending-change explanations return capped category and merchant drivers
+- subscription, unusual-charge, and budget tools are scoped to the current user
 - user fact writes include `userId`
 
 Wire tools into `/ai/chat`.
@@ -521,7 +536,7 @@ Commit:
 git add -A && git commit -m "feat(worker): CSV import with dedupe and import report"
 ```
 
-### Task 5.3: Monthly Rollups & `compare_periods`
+### Task 5.3: Daily Rollups & `compare_periods`
 
 Create:
 
@@ -533,13 +548,14 @@ Rollup behavior:
 
 - rebuild per user
 - use only `Transaction.amount < 0`
-- group by `date_trunc('month', postedAt)` and category
+- group by `date_trunc('day', postedAt)` and category
 - store positive `totalAmount = sum(abs(amount))`
-- upsert by `(userId, month, category)`
+- rebuild by deleting and inserting `(userId, day, category)` rows in one transaction
 
 `compare_periods` tool:
 
-- reads `MonthlyRollup` for current month and baseline months
+- reads `DailyRollup`
+- buckets daily totals into week/month/year periods in code
 - supports optional category
 - returns `{ current, baseline, deltaPct }`
 - does not read raw transactions
@@ -550,11 +566,12 @@ Tests:
 - percent delta
 - zero baseline returns `null` delta
 - current user id is included in rollup reads
+- current period is anchored to real `today`, not the latest transaction date
 
 Commit:
 
 ```bash
-git add -A && git commit -m "feat: monthly rollups and trend comparison tool"
+git add -A && git commit -m "feat: daily rollups and trend comparison tool"
 ```
 
 ---
@@ -640,5 +657,8 @@ git add -A && git commit -m "test: green typecheck and unit suite"
 
 - Every user-owned read/write uses current `userId`.
 - Spending queries filter `amount < 0`.
-- Trend comparisons use `MonthlyRollup`.
+- Trend comparisons use `DailyRollup`.
+- Explicit named-range comparisons do not use trailing-window rollup logic.
+- Month-vs-month explanations default to total spending unless the user explicitly carries a category forward.
+- Subscription, unusual-charge, and budget answers are framed with evidence and current scope.
 - README is honest about skipped features.

@@ -181,17 +181,27 @@ streamText({
   system,
   messages,
   tools,
-  stopWhen: stepCountIs(6),
+  stopWhen: stepCountIs(8),
 })
 ```
+
+Runtime context such as current date, imported-data coverage, and remembered facts is injected as late reference context before the newest user message. The stable system prompt and tool catalog stay byte-stable for prompt caching, and the reference context is explicitly marked as background only: the assistant must continue the active chat and use tool calls for finance numbers.
 
 Tool catalog:
 
 | Tool | Purpose | Data access |
 |---|---|---|
+| `get_data_status` | Check whether transactions are imported, plus counts/date coverage/categories | Aggregate + bounded category list, scoped to current user |
 | `query_spending` | Spend total for category/merchant/date range | Indexed raw aggregate with `amount < 0` |
 | `compare_periods` | Current period vs baseline, at week/month/year granularity | `DailyRollup` only (days bucketed into periods) |
+| `compare_spending_ranges` | Explicit named-range comparisons, including range-vs-average baselines | Indexed raw aggregates with exact date windows, scoped to current user |
+| `explain_spending_change` | Explain why one period cost more/less than another | Aggregates plus capped category/merchant delta drivers |
 | `list_transactions` | Biggest purchase / recent rows | Raw transactions, capped at 50, filtered to current user |
+| `get_spending_breakdown` | Per-category breakdown for summaries, cut-back suggestions, and period drivers | Raw grouped aggregate with `amount < 0`, scoped to current user |
+| `find_subscriptions` | Likely subscriptions from subscription-category recurring charges | Bounded subscription-category scan, then repeat-cadence/stable-amount heuristic |
+| `find_unusual_charges` | Charges that stand out, including category-median outliers and large one-offs | Bounded spending scan, then local statistical heuristics |
+| `set_budget` | Store/update a category budget | `Budget` upsert scoped to current user |
+| `get_budget_status` | Compare current-month spend against saved budgets | Budget read + current-month spend aggregate scoped to current user |
 | `save_user_fact` | Remember user preference/context | `UserFact` write for current user |
 | `get_user_facts` | Retrieve remembered context | `UserFact` read for current user |
 
@@ -222,8 +232,15 @@ MVP built for real:
 
 - SuperTokens auth + user records.
 - CSV import with dedupe, skipped-row report, and transaction inserts.
+- Data-status reporting through `get_data_status`.
 - Spending questions through `query_spending` and `list_transactions`.
 - Trend comparison through `compare_periods` on `DailyRollup` (bucketed to week/month/year).
+- Exact named-range comparisons through `compare_spending_ranges`.
+- Spending-change explanations through `explain_spending_change`.
+- Spending summaries and cut-back suggestions through `get_spending_breakdown`.
+- Likely subscriptions through `find_subscriptions`, framed with repeat-cadence/stable-amount evidence.
+- Charges to review through `find_unusual_charges`, framed as "stands out" evidence rather than fraud.
+- Simple category budgets through `set_budget` and `get_budget_status`.
 - User context memory through `save_user_fact` / `get_user_facts`.
 
 Stretch:
@@ -232,7 +249,7 @@ Stretch:
 
 Stubbed/described:
 
-- Subscriptions, anomaly detection, budgets, merchant web lookup, summaries, and cut-back suggestions.
+- Merchant web lookup, real bank integrations, scheduled summaries, object storage, and production receipt retention.
 
 ---
 
@@ -255,6 +272,9 @@ High-value tests:
 - Tool handlers include current `userId` in every query.
 - Spending tools filter `amount < 0` so income does not offset expenses.
 - `list_transactions` caps rows at 50.
+- Explicit range comparison uses exact date windows.
+- Spending-change explanation returns capped category and merchant drivers.
+- Subscription, unusual-charge, and budget tools stay scoped and bounded.
 - AIHelper model routing.
 - Receipt parsing only if stretch OCR is built.
 

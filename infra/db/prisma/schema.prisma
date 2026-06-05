@@ -69,6 +69,8 @@ model Budget {
   userId       String
   category     String
   monthlyLimit Decimal
+
+  @@unique([userId, category])
 }
 
 model ImportJob {

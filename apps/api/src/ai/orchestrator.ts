@@ -97,8 +97,8 @@ export async function runChat(
     }
   }
 
-  const providerOptions = AIHelper.getProviderOptions(AITask.CHAT, env);
-  const chatModelConfig = AIHelper.getModelConfig(AITask.CHAT, env);
+  const providerOptions = AIHelper.getProviderOptions(AITask.CHAT, env, cfg);
+  const chatModelConfig = AIHelper.getModelConfig(AITask.CHAT, env, cfg);
 
   // Groq's gpt-oss models occasionally surface `tool_use_failed` /
   // `json_validate_failed` generation errors inside raw chunks or the stream
@@ -134,7 +134,7 @@ export async function runChat(
     // `stepCountIs(8)` bounds the gather→answer loop.
     ...(tools ? { tools, toolChoice: 'auto' as const } : {}),
     stopWhen: stepCountIs(8),
-    temperature: AIHelper.getTemperature(AITask.CHAT, env),
+    temperature: AIHelper.getTemperature(AITask.CHAT, env, cfg),
     maxRetries: 0,
     ...(providerOptions ? { providerOptions } : {}),
     includeRawChunks: true,

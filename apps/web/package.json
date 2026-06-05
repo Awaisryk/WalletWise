@@ -19,6 +19,7 @@
     "lucide-react": "^0.396.0",
     "react": "18.3.1",
     "react-dom": "18.3.1",
+    "streamdown": "^2.5.0",
     "supertokens-auth-react": "^0.51.2",
     "supertokens-web-js": "^0.16.0",
     "tailwind-merge": "^2.5.4",
