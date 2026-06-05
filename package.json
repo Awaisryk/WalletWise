@@ -14,7 +14,7 @@
     "infra:up": "docker compose --env-file infra/compose/.env.dev -f infra/compose/docker-compose.yml up -d postgres supertokens-db supertokens redis",
     "infra:down": "docker compose --env-file infra/compose/.env.dev -f infra/compose/docker-compose.yml down",
     "infra:logs": "docker compose --env-file infra/compose/.env.dev -f infra/compose/docker-compose.yml logs -f",
-    "db:migrate": "dotenv -e infra/compose/.env.dev -- pnpm -C infra/db prisma migrate deploy",
+    "db:migrate": "dotenv -e infra/compose/.env.dev -- pnpm -C infra/db migrate:deploy",
     "db:seed": "dotenv -e infra/compose/.env.dev -- pnpm -C infra/db seed",
     "compose:up": "docker compose --env-file infra/compose/.env.dev -f infra/compose/docker-compose.yml up -d --build",
     "compose:down": "docker compose --env-file infra/compose/.env.dev -f infra/compose/docker-compose.yml down -v"
