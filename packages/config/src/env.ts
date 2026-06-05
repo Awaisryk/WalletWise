@@ -22,6 +22,10 @@ const base = z.object({
   AI_ENV: z.enum(['dev', 'prod']).default('dev'),
   LOCAL_AI_BASE_URL: optionalUrl,
   GROQ_API_KEY: z.string().optional(),
+  // OpenAI is an opt-in chat provider: set AI_PROVIDER=openai + OPENAI_API_KEY.
+  // OPENAI_MODEL defaults to gpt-5 (see AIHelper); override e.g. gpt-5-mini.
+  OPENAI_API_KEY: z.string().optional(),
+  OPENAI_MODEL: z.string().optional(),
   CHAT_MODEL: z.string().optional(),
   AI_PROVIDER: z.string().optional(),
   AI_REASONING_EFFORT: z.enum(['low', 'medium', 'high']).optional(),

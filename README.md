@@ -16,14 +16,19 @@ pnpm install
 
 # Local env: copy the committed example and fill in your AI credentials.
 cp infra/compose/.env.example infra/compose/.env.dev
-#   - dev (default): set LOCAL_AI_BASE_URL to a local OpenAI-compatible server
-#                     (e.g. LM Studio / Ollama at http://localhost:1234/v1)
-#   - prod routing:  set AI_ENV=prod and GROQ_API_KEY=<key>
+#   Pick ONE chat model provider:
+#   - Local:  AI_ENV=dev  + LOCAL_AI_BASE_URL=<local OpenAI-compatible server,
+#                            e.g. LM Studio / Ollama at http://localhost:1234/v1>
+#   - Groq:   AI_ENV=prod + GROQ_API_KEY=<key>          (Groq gpt-oss-120b)
+#   - OpenAI: AI_PROVIDER=openai + OPENAI_API_KEY=<key>  (OPENAI_MODEL defaults to
+#                            gpt-5; AI_PROVIDER=openai overrides AI_ENV)
 
-pnpm db:up          # docker: postgres + supertokens(-db) + redis
-pnpm db:migrate     # apply the Prisma migration to the app DB
+pnpm infra:up       # docker: postgres + supertokens(-db) + redis
+pnpm db:migrate     # apply the Prisma migrations to the app DB
 pnpm db:seed        # load the sample CSV into a demo user (authId "seed-demo")
 pnpm dev            # api (:4000) + web (:5173) + worker, all via turbo
+
+# pnpm infra:down   # stop the docker services when you're done
 ```
 
 Open **http://localhost:5173**, sign up with an email + password, upload `infra/db/sample/transactions.csv` (or your own export), and start asking questions.
@@ -40,9 +45,12 @@ Validated by a zod loader in `packages/config` (`apps/api` and `apps/worker` fai
 
 | Var | Purpose |
 |---|---|
-| `AI_ENV` | `dev` (local OpenAI-compatible model) or `prod` (Groq). Selects model routing. |
+| `AI_ENV` | `dev` (local OpenAI-compatible model) or `prod` (Groq). Selects model routing unless `AI_PROVIDER=openai`. |
 | `LOCAL_AI_BASE_URL` | OpenAI-compatible base URL for dev chat (default `http://localhost:1234/v1`). |
 | `GROQ_API_KEY` | Required when `AI_ENV=prod` (and for receipt OCR routing, which is stubbed). |
+| `AI_PROVIDER` | Set to `openai` to use OpenAI for chat (overrides `AI_ENV`). Otherwise leave blank. |
+| `OPENAI_API_KEY` | Required when `AI_PROVIDER=openai`. |
+| `OPENAI_MODEL` | OpenAI chat model id; defaults to `gpt-5` (e.g. set `gpt-5-mini` for a cheaper tier). |
 | `DATABASE_URL` | Postgres connection for the app DB (api, worker, migrate, seed). |
 | `REDIS_URL` | Redis for the BullMQ queue and the per-conversation cost counter. |
 | `SUPERTOKENS_CORE_URL` / `SUPERTOKENS_API_KEY` | SuperTokens core endpoint + key. |

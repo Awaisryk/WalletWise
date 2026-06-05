@@ -171,6 +171,9 @@ export class AiController {
     const cfg = {
       GROQ_API_KEY: this.env.GROQ_API_KEY,
       LOCAL_AI_BASE_URL: this.env.LOCAL_AI_BASE_URL,
+      AI_PROVIDER: this.env.AI_PROVIDER,
+      OPENAI_API_KEY: this.env.OPENAI_API_KEY,
+      OPENAI_MODEL: this.env.OPENAI_MODEL,
     };
     const conversationId = body.conversationId;
     const costKey = conversationId ? `walletwise:cost:${conversationId}` : '';
@@ -271,7 +274,7 @@ export class AiController {
             messageMetadata: ({ part }) => {
               if (part.type === 'finish') {
                 const usage = (part as any).totalUsage || {};
-                const cost = AIHelper.calculateCost(usage, AITask.CHAT, env);
+                const cost = AIHelper.calculateCost(usage, AITask.CHAT, env, cfg);
                 const cumulativeCost = (prevCost || 0) + (cost || 0);
 
                 // Persist the new cumulative cost (best-effort).
