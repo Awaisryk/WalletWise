@@ -5,7 +5,7 @@
   "description": "WalletWise API server (NestJS + Fastify)",
   "main": "dist/main.js",
   "scripts": {
-    "dev": "tsx watch src/main.ts",
+    "dev": "node --watch --watch-preserve-output -r @swc-node/register src/main.ts",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/main.js",
     "typecheck": "tsc --noEmit",

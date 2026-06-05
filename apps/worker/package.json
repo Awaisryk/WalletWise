@@ -5,7 +5,7 @@
   "description": "WalletWise BullMQ worker (NestJS standalone)",
   "main": "dist/main.js",
   "scripts": {
-    "dev": "tsx watch src/main.ts",
+    "dev": "node --watch --watch-preserve-output -r @swc-node/register src/main.ts",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/main.js",
     "typecheck": "tsc --noEmit",
