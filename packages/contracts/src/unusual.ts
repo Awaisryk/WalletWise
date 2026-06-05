@@ -31,6 +31,20 @@ export interface UnusualCharge {
   timesMedian: number;
 }
 
+export interface LargeOneOffCharge {
+  id?: string;
+  merchant: string;
+  category: string;
+  amount: number; // positive dollars
+  postedAt: string; // YYYY-MM-DD
+  /** How many charges exist in this category inside the scanned window. */
+  categoryTxnCount: number;
+  /** Median charge across all scanned spending, used when category history is sparse. */
+  globalMedian: number;
+  /** How many times the global median this charge is, rounded to 1 dp. */
+  timesGlobalMedian: number | null;
+}
+
 export interface UnusualOptions {
   /** Flag charges >= this multiple of the category median. Default 3. */
   multiple?: number;
@@ -40,6 +54,19 @@ export interface UnusualOptions {
   floor?: number;
   /** Cap on how many outliers to return (largest first). Default 10. */
   limit?: number;
+}
+
+export interface LargeOneOffOptions {
+  /** Consider categories with this many or fewer charges as sparse. Default 1. */
+  maxCategorySize?: number;
+  /** Ignore charges below this dollar floor. Default 100. */
+  floor?: number;
+  /** Require the charge to be at least this multiple of the global median. Default 3. */
+  multiple?: number;
+  /** Cap on how many one-offs to return (largest first). Default 5. */
+  limit?: number;
+  /** Categories that are expected to be large/regular and should not be called one-offs. */
+  excludeCategories?: string[];
 }
 
 function median(values: number[]): number {
@@ -98,6 +125,58 @@ export function detectUnusualCharges(
         timesMedian: Math.round((amt / med) * 10) / 10,
       });
     }
+  }
+
+  return out.sort((a, b) => b.amount - a.amount).slice(0, limit);
+}
+
+/**
+ * Find large charges in categories with too little history for a per-category
+ * median. These are not "unusual vs category median"; they are separate
+ * large one-offs worth surfacing because a strict median rule would otherwise
+ * hide new-category spikes.
+ */
+export function detectLargeOneOffCharges(
+  txns: UnusualInputTxn[],
+  opts: LargeOneOffOptions = {},
+): LargeOneOffCharge[] {
+  const maxCategorySize = opts.maxCategorySize ?? 1;
+  const floor = opts.floor ?? 100;
+  const multiple = opts.multiple ?? 3;
+  const limit = opts.limit ?? 5;
+  const excluded = new Set((opts.excludeCategories ?? ['rent', 'mortgage']).map((c) => c.toLowerCase()));
+
+  const spending = txns.filter((t) => t.amount < 0);
+  const globalMedian = Math.round(median(spending.map((t) => Math.abs(t.amount))) * 100) / 100;
+  if (spending.length === 0) return [];
+
+  const categoryCounts = new Map<string, number>();
+  for (const t of spending) {
+    const category = t.category ?? 'uncategorized';
+    categoryCounts.set(category, (categoryCounts.get(category) ?? 0) + 1);
+  }
+
+  const out: LargeOneOffCharge[] = [];
+  for (const t of spending) {
+    const category = t.category ?? 'uncategorized';
+    if (excluded.has(category.toLowerCase())) continue;
+
+    const amount = Math.abs(t.amount);
+    const categoryTxnCount = categoryCounts.get(category) ?? 0;
+    if (categoryTxnCount > maxCategorySize) continue;
+    if (amount < floor) continue;
+    if (globalMedian > 0 && amount < globalMedian * multiple) continue;
+
+    out.push({
+      ...(t.id ? { id: t.id } : {}),
+      merchant: t.merchant.trim(),
+      category,
+      amount: Math.round(amount * 100) / 100,
+      postedAt: ymd(t.postedAt),
+      categoryTxnCount,
+      globalMedian,
+      timesGlobalMedian: globalMedian > 0 ? Math.round((amount / globalMedian) * 10) / 10 : null,
+    });
   }
 
   return out.sort((a, b) => b.amount - a.amount).slice(0, limit);

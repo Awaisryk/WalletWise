@@ -1,4 +1,4 @@
-import { detectUnusualCharges } from './unusual';
+import { detectLargeOneOffCharges, detectUnusualCharges } from './unusual';
 
 function txn(merchant: string, amount: number, category: string | null, isoDate: string, id?: string) {
   return { merchant, amount, category, postedAt: new Date(isoDate + 'T00:00:00Z'), id };
@@ -59,5 +59,33 @@ describe('detectUnusualCharges', () => {
       txn('Salary', 5000, 'income', '2026-05-01'),
     ];
     expect(detectUnusualCharges(txns)).toHaveLength(0);
+  });
+
+  it('surfaces large one-off charges in sparse categories separately', () => {
+    const txns = [
+      txn('Cafe', -20, 'dining', '2026-05-01'),
+      txn('Grocer', -50, 'groceries', '2026-05-02'),
+      txn('Uber', -40, 'transport', '2026-05-03'),
+      txn('Apple Store', -210, 'shopping', '2026-05-04', 'apple'),
+    ];
+    const r = detectLargeOneOffCharges(txns);
+    expect(r).toHaveLength(1);
+    expect(r[0]).toMatchObject({
+      id: 'apple',
+      merchant: 'Apple Store',
+      category: 'shopping',
+      amount: 210,
+      categoryTxnCount: 1,
+    });
+  });
+
+  it('does not call sparse rent a large one-off by default', () => {
+    const txns = [
+      txn('Cafe', -20, 'dining', '2026-05-01'),
+      txn('Grocer', -50, 'groceries', '2026-05-02'),
+      txn('Uber', -40, 'transport', '2026-05-03'),
+      txn('Landlord Rent', -1200, 'rent', '2026-05-04', 'rent'),
+    ];
+    expect(detectLargeOneOffCharges(txns)).toHaveLength(0);
   });
 });

@@ -31,6 +31,31 @@ describe('detectRecurringCharges', () => {
     });
   });
 
+  it('detects a monthly subscription with one skipped billing cycle', () => {
+    const txns = [
+      txn('Spotify', -14.99, '2026-02-10'),
+      txn('Spotify', -14.99, '2026-04-09'),
+      txn('Spotify', -14.99, '2026-05-09'),
+    ];
+    const r = detectRecurringCharges(txns);
+    expect(r).toHaveLength(1);
+    expect(r[0]).toMatchObject({
+      merchant: 'Spotify',
+      cadence: 'monthly',
+      typicalAmount: 14.99,
+      occurrences: 3,
+    });
+  });
+
+  it('does not treat very sparse repeats as monthly cadence', () => {
+    const txns = [
+      txn('Tesco', -85.2, '2026-01-05'),
+      txn('Tesco', -75.3, '2026-04-02'),
+      txn('Tesco', -88.4, '2026-05-03'),
+    ];
+    expect(detectRecurringCharges(txns)).toHaveLength(0);
+  });
+
   it('ignores merchants with too few charges', () => {
     const txns = [txn('Spotify', -9.99, '2026-01-01'), txn('Spotify', -9.99, '2026-02-01')];
     expect(detectRecurringCharges(txns)).toHaveLength(0);

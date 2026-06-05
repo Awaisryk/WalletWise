@@ -4,11 +4,128 @@ import {
   periodDelta,
   bucketDailyTotals,
   currentPeriodKey,
+  detectLargeOneOffCharges,
   detectRecurringCharges,
   detectUnusualCharges,
 } from '@walletwise/contracts';
 import type { PrismaService } from '../../prisma/prisma.service';
 import { createTool } from './tool-wrapper';
+
+const MS_PER_DAY = 86_400_000;
+
+function clampInt(value: unknown, fallback: number, min: number, max: number): number {
+  const n = typeof value === 'number' && Number.isFinite(value) ? Math.trunc(value) : fallback;
+  return Math.min(Math.max(n, min), max);
+}
+
+function parseValidDate(value: string | undefined): Date | null {
+  if (!value) return null;
+  const d = new Date(value);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+function boundedDateRange(args: {
+  today: Date;
+  from?: string;
+  to?: string;
+  defaultDays: number;
+  maxDays: number;
+}): { start: Date; end: Date; clamped: boolean } {
+  const defaultEnd = new Date(
+    Date.UTC(args.today.getUTCFullYear(), args.today.getUTCMonth(), args.today.getUTCDate() + 1),
+  );
+  const end = parseValidDate(args.to) ?? defaultEnd;
+  let start = parseValidDate(args.from) ?? new Date(end.getTime() - args.defaultDays * MS_PER_DAY);
+  let clamped = false;
+
+  if (start >= end) {
+    start = new Date(end.getTime() - args.defaultDays * MS_PER_DAY);
+    clamped = true;
+  }
+
+  const earliest = new Date(end.getTime() - args.maxDays * MS_PER_DAY);
+  if (start < earliest) {
+    start = earliest;
+    clamped = true;
+  }
+
+  return { start, end, clamped };
+}
+
+function parseRequiredDate(value: string, label: string): Date {
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) {
+    throw new Error(`${label} must be a valid ISO date`);
+  }
+  return d;
+}
+
+function assertDateRange(from: Date, to: Date, label: string): void {
+  if (from >= to) {
+    throw new Error(`${label} must have from before to`);
+  }
+}
+
+function roundMoney(value: number): number {
+  return Math.round((value + 1e-9 * Math.sign(value || 1)) * 100) / 100;
+}
+
+function roundPct(value: number): number {
+  return Math.round((value + 1e-9 * Math.sign(value || 1)) * 100) / 100;
+}
+
+function pctChange(current: number, baseline: number): number | null {
+  if (baseline === 0) return null;
+  return roundPct(((current - baseline) / baseline) * 100);
+}
+
+function countPeriods(from: Date, to: Date, grain: 'range' | 'day' | 'week' | 'month' | 'year'): number {
+  if (grain === 'range') return 1;
+  if (grain === 'day') return Math.max(1, Math.round((to.getTime() - from.getTime()) / MS_PER_DAY));
+  if (grain === 'week') return Math.max(1, Math.round((to.getTime() - from.getTime()) / (MS_PER_DAY * 7)));
+  if (grain === 'month') {
+    const months = (to.getUTCFullYear() - from.getUTCFullYear()) * 12 + to.getUTCMonth() - from.getUTCMonth();
+    return Math.max(1, months);
+  }
+  return Math.max(1, to.getUTCFullYear() - from.getUTCFullYear());
+}
+
+function spendTotal(value: unknown): number {
+  return roundMoney(Math.abs(Number(value ?? 0)));
+}
+
+function mergeDeltas(
+  currentRows: Array<{ key: string; total: number; txnCount: number }>,
+  previousRows: Array<{ key: string; total: number; txnCount: number }>,
+  keyName: 'category' | 'merchant',
+  limit: number,
+) {
+  const current = new Map(currentRows.map((r) => [r.key, r]));
+  const previous = new Map(previousRows.map((r) => [r.key, r]));
+  const keys = new Set([...current.keys(), ...previous.keys()]);
+
+  return [...keys]
+    .map((key) => {
+      const c = current.get(key);
+      const p = previous.get(key);
+      const currentTotal = c?.total ?? 0;
+      const previousTotal = p?.total ?? 0;
+      const delta = roundMoney(currentTotal - previousTotal);
+      return {
+        [keyName]: key,
+        current: currentTotal,
+        previous: previousTotal,
+        delta,
+        deltaPct: pctChange(currentTotal, previousTotal),
+        currentTxnCount: c?.txnCount ?? 0,
+        previousTxnCount: p?.txnCount ?? 0,
+        status: previousTotal === 0 && currentTotal > 0 ? 'new' : delta > 0 ? 'increase' : delta < 0 ? 'decrease' : 'flat',
+      };
+    })
+    .filter((row) => row.delta !== 0)
+    .sort((a, b) => b.delta - a.delta || Math.abs(b.delta) - Math.abs(a.delta))
+    .slice(0, limit);
+}
 
 /**
  * WalletWise assistant tool catalog.
@@ -37,6 +154,60 @@ export function buildTools({
    */
   today?: Date;
 }): Record<string, Tool> {
+  const aggregateSpending = async ({
+    from,
+    to,
+    category,
+    merchant,
+  }: {
+    from: Date;
+    to: Date;
+    category?: string;
+    merchant?: string;
+  }) => {
+    const result = await prisma.transaction.aggregate({
+      where: {
+        userId,
+        amount: { lt: 0 },
+        postedAt: { gte: from, lt: to },
+        ...(category ? { category: { equals: category, mode: 'insensitive' as const } } : {}),
+        ...(merchant ? { merchantRaw: { contains: merchant, mode: 'insensitive' } } : {}),
+      },
+      _sum: { amount: true },
+      _count: true,
+    });
+    return { total: spendTotal(result._sum.amount), txnCount: result._count };
+  };
+
+  const groupSpending = async ({
+    from,
+    to,
+    category,
+    by,
+  }: {
+    from: Date;
+    to: Date;
+    category?: string;
+    by: 'category' | 'merchantRaw';
+  }): Promise<Array<{ key: string; total: number; txnCount: number }>> => {
+    const rows = await prisma.transaction.groupBy({
+      by: [by],
+      where: {
+        userId,
+        amount: { lt: 0 },
+        postedAt: { gte: from, lt: to },
+        ...(category ? { category: { equals: category, mode: 'insensitive' as const } } : {}),
+      },
+      _sum: { amount: true },
+      _count: true,
+    });
+    return rows.map((r: any) => ({
+      key: by === 'category' ? (r.category ?? 'uncategorized') : r.merchantRaw,
+      total: spendTotal(r._sum?.amount),
+      txnCount: r._count,
+    }));
+  };
+
   const tools = {
     /**
      * Lightweight data-availability probe. This gives the model a grounded way
@@ -283,6 +454,112 @@ export function buildTools({
     }),
 
     /**
+     * Explicit range comparison for named dates/months, including "May vs the
+     * average of Jan-Apr". This intentionally does NOT infer "current" from
+     * today's date; the model must provide the exact requested date windows.
+     */
+    compare_spending_ranges: createTool({
+      name: 'compare_spending_ranges',
+      description:
+        'Compare spending in one explicit date range against another explicit baseline date range. Use for named-range comparisons such as "May vs April" or "May groceries vs the average of Jan through Apr"; do not use compare_periods for those. baselineGrain controls the baseline average: "range" compares against the whole baseline range, "month" averages the baseline over calendar months, "week"/"day"/"year" average over those periods. Dates are ISO; from is inclusive and to is exclusive.',
+      inputSchema: z.object({
+        currentFrom: z.string().describe('ISO date inclusive for the target/current range'),
+        currentTo: z.string().describe('ISO date exclusive for the target/current range'),
+        baselineFrom: z.string().describe('ISO date inclusive for the comparison/baseline range'),
+        baselineTo: z.string().describe('ISO date exclusive for the comparison/baseline range'),
+        category: z.string().optional(),
+        merchant: z.string().optional(),
+        baselineGrain: z.enum(['range', 'day', 'week', 'month', 'year']).optional(),
+      }),
+      execute: async ({ currentFrom, currentTo, baselineFrom, baselineTo, category, merchant, baselineGrain }) => {
+        const currentStart = parseRequiredDate(currentFrom, 'currentFrom');
+        const currentEnd = parseRequiredDate(currentTo, 'currentTo');
+        const baselineStart = parseRequiredDate(baselineFrom, 'baselineFrom');
+        const baselineEnd = parseRequiredDate(baselineTo, 'baselineTo');
+        assertDateRange(currentStart, currentEnd, 'current range');
+        assertDateRange(baselineStart, baselineEnd, 'baseline range');
+
+        const grain = baselineGrain ?? 'range';
+        const [current, baseline] = await Promise.all([
+          aggregateSpending({ from: currentStart, to: currentEnd, category, merchant }),
+          aggregateSpending({ from: baselineStart, to: baselineEnd, category, merchant }),
+        ]);
+        const baselinePeriodCount = countPeriods(baselineStart, baselineEnd, grain);
+        const baselineAverageRaw = baseline.total / baselinePeriodCount;
+        const baselineAverage = roundMoney(baselineAverageRaw);
+        const delta = roundMoney(current.total - baselineAverageRaw);
+
+        return {
+          current: { from: currentFrom, to: currentTo, ...current },
+          baseline: {
+            from: baselineFrom,
+            to: baselineTo,
+            total: baseline.total,
+            txnCount: baseline.txnCount,
+            grain,
+            periodCount: baselinePeriodCount,
+            averagePerPeriod: baselineAverage,
+          },
+          deltaVsBaselineAverage: delta,
+          deltaPctVsBaselineAverage: pctChange(current.total, baselineAverageRaw),
+          currency: 'USD',
+          inputSummary: { currentFrom, currentTo, baselineFrom, baselineTo, category, merchant, baselineGrain: grain },
+        };
+      },
+    }),
+
+    /**
+     * Driver analysis for "why did period A cost more than period B". Returns
+     * total movement plus category and merchant deltas so the assistant can name
+     * the actual drivers instead of over-focusing on previous conversational
+     * context.
+     */
+    explain_spending_change: createTool({
+      name: 'explain_spending_change',
+      description:
+        'Explain why spending changed between two explicit date ranges. Use for questions like "why was May more expensive than April?" or "what drove the increase?". If the user does not name a category, leave category unset and compare total spending. Returns total delta plus category and merchant drivers sorted by increase. Dates are ISO; currentFrom/currentTo are the period being explained, previousFrom/previousTo are the comparison period.',
+      inputSchema: z.object({
+        currentFrom: z.string().describe('ISO date inclusive for the period being explained'),
+        currentTo: z.string().describe('ISO date exclusive for the period being explained'),
+        previousFrom: z.string().describe('ISO date inclusive for the comparison period'),
+        previousTo: z.string().describe('ISO date exclusive for the comparison period'),
+        category: z.string().optional(),
+        limit: z.number().optional().describe('maximum category/merchant drivers to return, default 8, capped at 20'),
+      }),
+      execute: async ({ currentFrom, currentTo, previousFrom, previousTo, category, limit }) => {
+        const currentStart = parseRequiredDate(currentFrom, 'currentFrom');
+        const currentEnd = parseRequiredDate(currentTo, 'currentTo');
+        const previousStart = parseRequiredDate(previousFrom, 'previousFrom');
+        const previousEnd = parseRequiredDate(previousTo, 'previousTo');
+        assertDateRange(currentStart, currentEnd, 'current range');
+        assertDateRange(previousStart, previousEnd, 'previous range');
+        const take = clampInt(limit, 8, 1, 20);
+
+        const [current, previous, currentCategories, previousCategories, currentMerchants, previousMerchants] =
+          await Promise.all([
+            aggregateSpending({ from: currentStart, to: currentEnd, category }),
+            aggregateSpending({ from: previousStart, to: previousEnd, category }),
+            groupSpending({ from: currentStart, to: currentEnd, category, by: 'category' }),
+            groupSpending({ from: previousStart, to: previousEnd, category, by: 'category' }),
+            groupSpending({ from: currentStart, to: currentEnd, category, by: 'merchantRaw' }),
+            groupSpending({ from: previousStart, to: previousEnd, category, by: 'merchantRaw' }),
+          ]);
+        const delta = roundMoney(current.total - previous.total);
+
+        return {
+          current: { from: currentFrom, to: currentTo, ...current },
+          previous: { from: previousFrom, to: previousTo, ...previous },
+          delta,
+          deltaPct: pctChange(current.total, previous.total),
+          categoryDrivers: mergeDeltas(currentCategories, previousCategories, 'category', take),
+          merchantDrivers: mergeDeltas(currentMerchants, previousMerchants, 'merchant', take),
+          currency: 'USD',
+          inputSummary: { currentFrom, currentTo, previousFrom, previousTo, category, limit: take },
+        };
+      },
+    }),
+
+    /**
      * Surface likely recurring subscriptions (#3). Pulls the user's recent
      * spending charges and runs the pure `detectRecurringCharges` heuristic
      * (repeat merchant + steady cadence + stable amount). Results are *likely*
@@ -292,15 +569,21 @@ export function buildTools({
     find_subscriptions: createTool({
       name: 'find_subscriptions',
       description:
-        "Find the user's likely recurring subscriptions — merchants that charge them repeatedly at a steady cadence (weekly/monthly/yearly) for a stable amount. Returns each likely subscription with its cadence, typical amount, occurrence count, and first/last charge dates. Use for \"what subscriptions do I have?\", \"am I paying for anything I forgot?\", or recurring-charge questions. These are inferred (likely), so present them as such.",
+        "Find the user's likely subscriptions from charges categorized as subscriptions that repeat at a steady cadence for a stable amount. Returns each likely subscription with cadence, typical amount, occurrence count, and first/last charge dates. Use for subscription questions such as \"what subscriptions do I have?\" or \"am I paying for subscriptions I forgot?\" These are inferred (likely), so present them as such; do not call rent or ordinary bills subscriptions unless they are categorized as subscriptions.",
       inputSchema: z.object({
-        monthsBack: z.number().optional().describe('how many months of history to scan, default 12'),
+        monthsBack: z.number().optional().describe('how many months of history to scan, default 12, capped at 24'),
       }),
       execute: async ({ monthsBack }) => {
-        const months = monthsBack ?? 12;
+        const months = clampInt(monthsBack, 12, 1, 24);
         const since = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth() - months, today.getUTCDate()));
         const rows = await prisma.transaction.findMany({
-          where: { userId, amount: { lt: 0 }, postedAt: { gte: since } },
+          where: {
+            userId,
+            amount: { lt: 0 },
+            postedAt: { gte: since },
+            category: { equals: 'subscriptions', mode: 'insensitive' as const },
+          },
+          orderBy: { postedAt: 'asc' },
           select: { merchantRaw: true, amount: true, postedAt: true },
         });
         const subscriptions = detectRecurringCharges(
@@ -311,7 +594,12 @@ export function buildTools({
           })),
         );
         const estimatedMonthly = subscriptions.reduce((sum, s) => {
-          const perMonth = s.cadence === 'weekly' ? s.typicalAmount * 4.33 : s.cadence === 'yearly' ? s.typicalAmount / 12 : s.typicalAmount;
+          const perMonth =
+            s.cadence === 'weekly'
+              ? s.typicalAmount * 4.33
+              : s.cadence === 'yearly'
+                ? s.typicalAmount / 12
+                : s.typicalAmount;
           return sum + perMonth;
         }, 0);
         return {
@@ -319,6 +607,7 @@ export function buildTools({
           count: subscriptions.length,
           estimatedMonthlyTotal: Math.round(estimatedMonthly * 100) / 100,
           currency: 'USD',
+          basis: 'spending rows categorized as subscriptions, then repeat-cadence/stable-amount detection',
           inputSummary: { monthsBack: months },
         };
       },
@@ -334,40 +623,40 @@ export function buildTools({
     find_unusual_charges: createTool({
       name: 'find_unusual_charges',
       description:
-        "Flag the user's unusual charges — individual charges that are much larger than what they typically spend in that category (compared against their own history). Returns each outlier with its amount, category, the category's median charge, and how many times the median it is. Use for \"any unusual activity?\", \"did anything weird get charged?\", or \"flag big/out-of-pattern charges\". Scans recent history; present results as charges that stand out, with the comparison.",
+        "Flag charges that stand out in the user's recent spending. Returns category-median outliers plus large one-off charges in sparse/new categories. Use for \"any unusual activity?\", \"did anything weird get charged?\", or \"flag big/out-of-pattern charges\". Present results as charges that stand out with the comparison evidence, not as confirmed fraud.",
       inputSchema: z.object({
-        from: z.string().optional().describe('ISO date inclusive; defaults to ~90 days ago'),
+        from: z.string().optional().describe('ISO date inclusive; defaults to ~90 days ago, capped to a 180-day window'),
         to: z.string().optional().describe('ISO date exclusive; defaults to tomorrow'),
-        limit: z.number().optional(),
+        limit: z.number().optional().describe('maximum rows per result group, default 10, capped at 20'),
       }),
       execute: async ({ from, to, limit }) => {
-        const start = from
-          ? new Date(from)
-          : new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate() - 90));
-        const end = to
-          ? new Date(to)
-          : new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate() + 1));
+        const take = clampInt(limit, 10, 1, 20);
+        const { start, end, clamped } = boundedDateRange({ today, from, to, defaultDays: 90, maxDays: 180 });
         const rows = await prisma.transaction.findMany({
           where: { userId, amount: { lt: 0 }, postedAt: { gte: start, lt: end } },
+          orderBy: { postedAt: 'desc' },
           select: { id: true, merchantRaw: true, amount: true, category: true, postedAt: true },
         });
-        const unusual = detectUnusualCharges(
-          rows.map((r: { id: string; merchantRaw: string; amount: unknown; category: string | null; postedAt: Date }) => ({
-            id: r.id,
-            merchant: r.merchantRaw,
-            amount: Number(r.amount),
-            category: r.category,
-            postedAt: r.postedAt,
-          })),
-          { limit: limit ?? 10 },
-        );
+        const txns = rows.map((r: { id: string; merchantRaw: string; amount: unknown; category: string | null; postedAt: Date }) => ({
+          id: r.id,
+          merchant: r.merchantRaw,
+          amount: Number(r.amount),
+          category: r.category,
+          postedAt: r.postedAt,
+        }));
+        const unusual = detectUnusualCharges(txns, { limit: take });
+        const largeOneOffs = detectLargeOneOffCharges(txns, { limit: take });
         return {
           unusualCharges: unusual,
-          count: unusual.length,
+          largeOneOffCharges: largeOneOffs,
+          count: unusual.length + largeOneOffs.length,
+          unusualCount: unusual.length,
+          largeOneOffCount: largeOneOffs.length,
           from: start.toISOString().slice(0, 10),
           to: end.toISOString().slice(0, 10),
           currency: 'USD',
-          inputSummary: { from, to, limit },
+          ...(clamped ? { note: 'date range was clamped to a bounded scan window' } : {}),
+          inputSummary: { from, to, limit: take },
         };
       },
     }),

@@ -38,12 +38,23 @@ export interface RecurringOptions {
   minOccurrences?: number;
 }
 
-/** Cadence windows in days: [min, max] gap that counts as that cadence. */
-const CADENCE_WINDOWS: Array<{ cadence: Cadence; min: number; max: number }> = [
-  { cadence: 'weekly', min: 6, max: 8 },
-  { cadence: 'monthly', min: 26, max: 35 },
-  { cadence: 'yearly', min: 350, max: 380 },
-];
+/**
+ * Cadence windows in days. For weekly/monthly charges we tolerate one missed
+ * billing cycle (for example Feb -> Apr -> May) as long as at least one direct
+ * interval is observed. That avoids missing common subscriptions while still
+ * rejecting sparse, arbitrary repeats.
+ */
+const CADENCE_WINDOWS: Record<Cadence, Array<{ min: number; max: number; direct: boolean }>> = {
+  weekly: [
+    { min: 6, max: 8, direct: true },
+    { min: 12, max: 16, direct: false },
+  ],
+  monthly: [
+    { min: 26, max: 35, direct: true },
+    { min: 52, max: 70, direct: false },
+  ],
+  yearly: [{ min: 350, max: 380, direct: true }],
+};
 
 /** Normalize a merchant string into a grouping key (case/space-insensitive). */
 export function normalizeMerchant(merchant: string): string {
@@ -63,9 +74,16 @@ function ymd(d: Date): string {
 
 function classifyCadence(gaps: number[]): Cadence | null {
   if (gaps.length === 0) return null;
-  const med = median(gaps);
-  for (const w of CADENCE_WINDOWS) {
-    if (med >= w.min && med <= w.max) return w.cadence;
+  for (const cadence of ['weekly', 'monthly', 'yearly'] as const) {
+    let sawDirect = false;
+    const matches = gaps.every((gap) => {
+      const window = CADENCE_WINDOWS[cadence].find((w) => gap >= w.min && gap <= w.max);
+      if (window?.direct) sawDirect = true;
+      return Boolean(window);
+    });
+    if (matches && sawDirect) {
+      return cadence;
+    }
   }
   return null;
 }

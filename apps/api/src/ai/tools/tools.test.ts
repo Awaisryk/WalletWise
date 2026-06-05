@@ -119,40 +119,153 @@ describe('buildTools', () => {
     expect(r.categories[2]).toMatchObject({ category: 'uncategorized', total: 100 });
   });
 
-  it('find_subscriptions scans userId-scoped spending and returns detected recurring charges', async () => {
-    const { prisma, findMany } = makePrisma();
-    // Three monthly Netflix charges (stable amount, monthly cadence) + noise.
-    findMany.mockResolvedValueOnce([
-      { merchantRaw: 'Netflix', amount: -15.99, postedAt: new Date('2026-01-05T00:00:00Z') },
-      { merchantRaw: 'Netflix', amount: -15.99, postedAt: new Date('2026-02-04T00:00:00Z') },
-      { merchantRaw: 'Netflix', amount: -15.99, postedAt: new Date('2026-03-06T00:00:00Z') },
-      { merchantRaw: 'Best Buy', amount: -420, postedAt: new Date('2026-02-10T00:00:00Z') },
-    ]);
-    const tools = buildTools({ prisma, userId: 'u1', today: new Date('2026-05-15T00:00:00Z') });
-    const r: any = await tools.find_subscriptions.execute({}, {} as any);
-    expect(findMany).toHaveBeenCalledWith(
-      expect.objectContaining({ where: expect.objectContaining({ userId: 'u1', amount: { lt: 0 } }) }),
+  it('compare_spending_ranges compares an explicit month against a Jan-Apr monthly average', async () => {
+    const { prisma, aggregate } = makePrisma();
+    aggregate
+      .mockResolvedValueOnce({ _sum: { amount: -160.7 }, _count: 2 })
+      .mockResolvedValueOnce({ _sum: { amount: -530.3 }, _count: 8 });
+    const tools = buildTools({ prisma, userId: 'u1', today: new Date('2026-06-05T00:00:00Z') });
+    const r: any = await tools.compare_spending_ranges.execute(
+      {
+        currentFrom: '2026-05-01',
+        currentTo: '2026-06-01',
+        baselineFrom: '2026-01-01',
+        baselineTo: '2026-05-01',
+        category: 'groceries',
+        baselineGrain: 'month',
+      },
+      {} as any,
     );
-    expect(r.count).toBe(1);
-    expect(r.subscriptions[0]).toMatchObject({ merchant: 'Netflix', cadence: 'monthly', typicalAmount: 15.99 });
-    expect(r.estimatedMonthlyTotal).toBe(15.99);
+
+    expect(aggregate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          userId: 'u1',
+          amount: { lt: 0 },
+          category: { equals: 'groceries', mode: 'insensitive' },
+        }),
+      }),
+    );
+    expect(r.current).toMatchObject({ total: 160.7, txnCount: 2 });
+    expect(r.baseline).toMatchObject({
+      total: 530.3,
+      txnCount: 8,
+      grain: 'month',
+      periodCount: 4,
+      averagePerPeriod: 132.58,
+    });
+    expect(r.deltaVsBaselineAverage).toBe(28.13);
+    expect(r.deltaPctVsBaselineAverage).toBeCloseTo(21.21);
   });
 
-  it('find_unusual_charges scans userId-scoped spending and returns outliers vs category median', async () => {
+  it('explain_spending_change returns total, category, and merchant drivers for May vs April', async () => {
+    const { prisma, aggregate, groupBy } = makePrisma();
+    aggregate
+      .mockResolvedValueOnce({ _sum: { amount: -1713.59 }, _count: 8 })
+      .mockResolvedValueOnce({ _sum: { amount: -1469.89 }, _count: 8 });
+    groupBy
+      .mockResolvedValueOnce([
+        { category: 'rent', _sum: { amount: -1200 }, _count: 1 },
+        { category: 'groceries', _sum: { amount: -160.7 }, _count: 2 },
+        { category: 'dining', _sum: { amount: -83.8 }, _count: 2 },
+        { category: 'transport', _sum: { amount: -44.1 }, _count: 1 },
+        { category: 'subscriptions', _sum: { amount: -14.99 }, _count: 1 },
+        { category: 'shopping', _sum: { amount: -210 }, _count: 1 },
+      ])
+      .mockResolvedValueOnce([
+        { category: 'rent', _sum: { amount: -1200 }, _count: 1 },
+        { category: 'groceries', _sum: { amount: -137.7 }, _count: 2 },
+        { category: 'dining', _sum: { amount: -77.7 }, _count: 3 },
+        { category: 'transport', _sum: { amount: -39.5 }, _count: 1 },
+        { category: 'subscriptions', _sum: { amount: -14.99 }, _count: 1 },
+      ])
+      .mockResolvedValueOnce([
+        { merchantRaw: 'APPLE STORE', _sum: { amount: -210 }, _count: 1 },
+        { merchantRaw: 'TESCO EXTRA', _sum: { amount: -88.4 }, _count: 1 },
+      ])
+      .mockResolvedValueOnce([{ merchantRaw: 'TESCO EXTRA', _sum: { amount: -75.3 }, _count: 1 }]);
+    const tools = buildTools({ prisma, userId: 'u1' });
+    const r: any = await tools.explain_spending_change.execute(
+      {
+        currentFrom: '2026-05-01',
+        currentTo: '2026-06-01',
+        previousFrom: '2026-04-01',
+        previousTo: '2026-05-01',
+      },
+      {} as any,
+    );
+
+    expect(r.current).toMatchObject({ total: 1713.59, txnCount: 8 });
+    expect(r.previous).toMatchObject({ total: 1469.89, txnCount: 8 });
+    expect(r.delta).toBe(243.7);
+    expect(r.deltaPct).toBeCloseTo(16.58);
+    expect(r.categoryDrivers[0]).toMatchObject({
+      category: 'shopping',
+      current: 210,
+      previous: 0,
+      delta: 210,
+      status: 'new',
+    });
+    expect(r.merchantDrivers[0]).toMatchObject({
+      merchant: 'APPLE STORE',
+      current: 210,
+      previous: 0,
+      delta: 210,
+      status: 'new',
+    });
+  });
+
+  it('find_subscriptions scans subscription-category spending and returns likely subscriptions', async () => {
+    const { prisma, findMany } = makePrisma();
+    // Spotify has one skipped billing cycle; rent is not returned because the
+    // tool only scans charges categorized as subscriptions.
+    findMany.mockResolvedValueOnce([
+      { merchantRaw: 'Spotify', amount: -14.99, postedAt: new Date('2026-02-10T00:00:00Z') },
+      { merchantRaw: 'Spotify', amount: -14.99, postedAt: new Date('2026-04-09T00:00:00Z') },
+      { merchantRaw: 'Spotify', amount: -14.99, postedAt: new Date('2026-05-09T00:00:00Z') },
+    ]);
+    const tools = buildTools({ prisma, userId: 'u1', today: new Date('2026-05-15T00:00:00Z') });
+    const r: any = await tools.find_subscriptions.execute({ monthsBack: 999 }, {} as any);
+    expect(findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          userId: 'u1',
+          amount: { lt: 0 },
+          category: { equals: 'subscriptions', mode: 'insensitive' },
+        }),
+        orderBy: { postedAt: 'asc' },
+      }),
+    );
+    const call = findMany.mock.calls[0][0] as any;
+    expect(call.where.postedAt.gte.toISOString().slice(0, 10)).toBe('2024-05-15');
+    expect(r.count).toBe(1);
+    expect(r.subscriptions[0]).toMatchObject({ merchant: 'Spotify', cadence: 'monthly', typicalAmount: 14.99 });
+    expect(r.estimatedMonthlyTotal).toBe(14.99);
+  });
+
+  it('find_unusual_charges scans bounded user spending and returns outliers plus large one-offs', async () => {
     const { prisma, findMany } = makePrisma();
     findMany.mockResolvedValueOnce([
       { id: 'c1', merchantRaw: 'Cafe A', amount: -4, category: 'dining', postedAt: new Date('2026-03-01T00:00:00Z') },
       { id: 'c2', merchantRaw: 'Cafe B', amount: -5, category: 'dining', postedAt: new Date('2026-03-02T00:00:00Z') },
       { id: 'c3', merchantRaw: 'Cafe C', amount: -6, category: 'dining', postedAt: new Date('2026-03-03T00:00:00Z') },
       { id: 'c4', merchantRaw: 'Steakhouse', amount: -120, category: 'dining', postedAt: new Date('2026-03-10T00:00:00Z') },
+      { id: 'c5', merchantRaw: 'Apple Store', amount: -210, category: 'shopping', postedAt: new Date('2026-03-11T00:00:00Z') },
     ]);
     const tools = buildTools({ prisma, userId: 'u1', today: new Date('2026-03-20T00:00:00Z') });
-    const r: any = await tools.find_unusual_charges.execute({}, {} as any);
+    const r: any = await tools.find_unusual_charges.execute({ from: '2025-01-01', limit: 999 }, {} as any);
     expect(findMany).toHaveBeenCalledWith(
-      expect.objectContaining({ where: expect.objectContaining({ userId: 'u1', amount: { lt: 0 } }) }),
+      expect.objectContaining({
+        where: expect.objectContaining({ userId: 'u1', amount: { lt: 0 } }),
+        orderBy: { postedAt: 'desc' },
+      }),
     );
-    expect(r.count).toBe(1);
+    expect(r.count).toBe(2);
+    expect(r.unusualCount).toBe(1);
+    expect(r.largeOneOffCount).toBe(1);
     expect(r.unusualCharges[0]).toMatchObject({ id: 'c4', merchant: 'Steakhouse', amount: 120, category: 'dining' });
+    expect(r.largeOneOffCharges[0]).toMatchObject({ id: 'c5', merchant: 'Apple Store', amount: 210, category: 'shopping' });
+    expect(r.note).toMatch(/clamped/);
   });
 
   it('set_budget upserts a normalized (lowercased) category scoped to userId', async () => {
