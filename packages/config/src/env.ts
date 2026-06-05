@@ -1,5 +1,16 @@
 import { z } from 'zod';
 
+/**
+ * An optional URL that tolerates an empty string. Env files routinely carry
+ * empty placeholders (e.g. `LOCAL_AI_BASE_URL=`); a plain `.url().optional()`
+ * would reject `''` because `.optional()` only accepts `undefined`. We map empty
+ * (or whitespace-only) to `undefined` first, then validate.
+ */
+const optionalUrl = z.preprocess(
+  (v) => (typeof v === 'string' && v.trim() === '' ? undefined : v),
+  z.string().url().optional(),
+);
+
 const base = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   PORT: z.coerce.number().default(4000),
@@ -9,7 +20,7 @@ const base = z.object({
   SUPERTOKENS_CORE_URL: z.string().url(),
   SUPERTOKENS_API_KEY: z.string().optional(),
   AI_ENV: z.enum(['dev', 'prod']).default('dev'),
-  LOCAL_AI_BASE_URL: z.string().url().optional(),
+  LOCAL_AI_BASE_URL: optionalUrl,
   GROQ_API_KEY: z.string().optional(),
   CHAT_MODEL: z.string().optional(),
   AI_PROVIDER: z.string().optional(),

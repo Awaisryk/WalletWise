@@ -20,4 +20,13 @@ describe('loadApiEnv', () => {
   it('coerces PORT to number', () => {
     expect(typeof loadApiEnv(base).PORT).toBe('number');
   });
+
+  it('treats an empty LOCAL_AI_BASE_URL as unset (env-file placeholder)', () => {
+    const env = loadApiEnv({ ...base, LOCAL_AI_BASE_URL: '' });
+    expect(env.LOCAL_AI_BASE_URL).toBeUndefined();
+  });
+
+  it('still rejects a non-empty invalid LOCAL_AI_BASE_URL', () => {
+    expect(() => loadApiEnv({ ...base, LOCAL_AI_BASE_URL: 'not-a-url' })).toThrow();
+  });
 });
