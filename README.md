@@ -162,6 +162,41 @@ Isolation is **application-level and enforced on every query**:
 
 ## What's built vs stubbed vs skipped
 
+### Capability coverage — the brief's ten
+
+The brief listed ten things the assistant should be able to do. **Eight are built**; two (receipt OCR and online merchant lookup) were deliberately scoped out — each needs a capability outside the imported-CSV + grounded-chat loop (a vision model; an external search API), and the brief explicitly rewards scoping over breadth.
+
+| # | Asked for | Status | How we built it |
+|---|---|---|---|
+| 1 | Answer questions about spending | ✅ Built | `query_spending` (totals by category/merchant/date), `list_transactions` (recent rows / biggest purchase), `compare_spending_ranges` |
+| 2 | Read a receipt from a photo | ⏭️ Skipped | Vision is *routed* (`AITask.PARSE_VISION` + the `RECEIPT_OCR` queue contract) but the worker throws "not implemented (stretch)" |
+| 3 | Surface recurring subscriptions | ✅ Built | `find_subscriptions` — repeat merchant + steady cadence + stable amount, presented as **likely** with the evidence |
+| 4 | Flag unusual activity | ✅ Built | `find_unusual_charges` — per-category-median outliers + large one-off charges, framed as **"stands out"**, not confirmed fraud |
+| 5 | Compare across time | ✅ Built | `compare_periods` (week/month/year over daily rollups, anchored on real "today"), `compare_spending_ranges` |
+| 6 | Track a budget | ✅ Built | `set_budget` + `get_budget_status` (this-month spend vs limit → ok / warning / over) |
+| 7 | Look up unfamiliar charges (incl. online) | ⏭️ Skipped | Needs an external web-search API + key; intentionally out of scope |
+| 8 | Summarise finances in plain English | ✅ Built | `get_spending_breakdown` (per-category totals + shares), `explain_spending_change` (deltas between periods) |
+| 9 | Suggest where to cut back | ✅ Built | Grounded in `get_spending_breakdown`'s real per-category numbers — never invented |
+| 10 | Remember user context | ✅ Built | `save_user_fact` / `get_user_facts`; remembered facts injected as late runtime context each turn |
+
+System-level requirements (which the brief weighs heavily) are covered too:
+
+| Requirement | Status | How |
+|---|---|---|
+| Fast / economical per request | ✅ | The database aggregates; the LLM sees compact tool results, never raw transaction rows |
+| Holds up at 10×–100× data | ✅ | Indexed aggregates + pre-computed daily rollups; no query scans the full ledger |
+| Many users, private per-user data | ✅ | SuperTokens auth; every query scoped to a server-side `userId`; the LLM never supplies an identity |
+| Routing & model selection | ✅ | `AIHelper` — a cheap local/Groq text model for chat; the vision tier is reserved for the (cut) OCR path |
+| Multi-step / agentic reasoning | ✅ | One tool-calling loop: gather what's needed via tools, then answer |
+| Messy inputs & dead ends | ✅ | Import dedup + skipped-row report; the assistant says what's missing rather than guessing |
+| Accuracy (no fabrication) | ✅ | Every number comes from a tool result; inferred results (subscriptions / unusual charges) are explicitly hedged |
+
+**Two honest non-capability gaps:** chat transcripts are not persisted across page reloads (your imported *data* and *remembered facts* are), and answers are text only — no charts.
+
+---
+
+### Detail
+
 **Built (works end-to-end):**
 - SuperTokens email/password auth; on sign-up the API upserts a `User { authId, email }`.
 - CSV import: async via the worker, with dedupe (per-user `dedupeHash`), a skipped-row report (duplicate / missing-field / malformed), and `createMany({ skipDuplicates: true })`.
